@@ -1,0 +1,31 @@
+# sweep_config.yaml
+# Defines the hyperparameter search space for the MAML-TRPO algorithm.
+# This file will be loaded by our Python script to create the sweep.
+
+method: bayes
+metric:
+  name: adaptation_reward
+  goal: maximize
+parameters:
+  adapt_lr:
+    distribution: log_uniform_values
+    min: 0.001
+    max: 1.0
+  meta_lr:
+    distribution: log_uniform_values
+    min: 0.1
+    max: 2.0
+  adapt_steps:
+    values: [1, 2, 3, 5]
+  gamma:
+    distribution: uniform
+    min: 0.90
+    max: 0.99
+  tau:
+    distribution: uniform
+    min: 0.90
+    max: 1.00
+  adapt_bsz:
+    values: [10, 20, 30]
+  meta_bsz:
+    values: [10, 20, 25]
