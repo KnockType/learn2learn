@@ -1,0 +1,36 @@
+# meta_sgd_sweep_config.yaml
+# Defines the hyperparameter search space for the Meta-SGD algorithm.
+
+method: bayes
+metric:
+  name: adaptation_reward
+  goal: maximize
+
+parameters:
+  # --- Environment and Training Length ---
+  env_name:
+    value: 'AntDirection-v1'
+  num_iterations:
+    value: 50
+
+  # --- Hyperparameters to Sweep ---
+  fast_lr_init:
+    distribution: log_uniform_values
+    min: 0.01
+    max: 1.0
+  meta_lr:
+    distribution: log_uniform_values
+    min: 0.0001
+    max: 0.01
+  adapt_steps:
+    values: [1, 3, 5]
+  gamma:
+    distribution: uniform
+    min: 0.95
+    max: 0.99
+  tau:
+    value: 1.00
+  adapt_bsz:
+    values: [20, 40]
+  meta_bsz:
+    values: [10, 20]
