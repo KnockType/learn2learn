@@ -7,6 +7,7 @@ This script is an adaptation of the original learn2learn MAML-TRPO example.
 """
 
 import random
+import os
 from copy import deepcopy
 
 import cherry as ch
@@ -14,28 +15,107 @@ import gym
 import numpy as np
 import torch
 import metaworld
+import wandb 
 from cherry.algorithms import a2c, trpo
 from cherry.models.robotics import LinearValue
 from torch import autograd
 from torch.distributions.kl import kl_divergence
 from torch.nn.utils import parameters_to_vector, vector_to_parameters
+from torch.utils.data import SubsetRandomSampler, BatchSampler
 from tqdm import tqdm
+from typing import Iterator, Dict, Any, List
+from collections import defaultdict
 
 import learn2learn as l2l
 from examples.rl.policies import DiagNormalPolicy # Assuming policies.py is in examples/rl/
+
+class _InfiniteSampler:
+    """A helper class that creates an infinite iterator to yield random batches."""
+    def __init__(self, items: List[Any], batch_size: int):
+        self.items = items
+        self.num_items = len(items)
+        self.batch_size = batch_size
+
+        # Guarantees each item appears at least floor(bsz / num_items) times
+        self.base_batch = self.items * (self.batch_size // self.num_items)
+        self.effective_batch_size = self.batch_size - len(self.base_batch)
+
+        if self.effective_batch_size > 0:
+            sampler = SubsetRandomSampler(range(self.num_items))
+            self.batch_sampler = BatchSampler(sampler, batch_size=self.effective_batch_size, drop_last=True)
+            self.iterator = iter(self.batch_sampler)
+        else:
+            self.iterator = None # Not needed if batch is just repetitions
+
+    def __iter__(self) -> Iterator:
+        return self
+
+    def __next__(self) -> List[Any]:
+        if self.effective_batch_size == 0:
+            return self.base_batch.copy() # Return copies to avoid mutation issues
+
+        try:
+            indices = next(self.iterator)
+        except StopIteration:
+            # Refill the iterator when it's exhausted
+            self.iterator = iter(self.batch_sampler)
+            indices = next(self.iterator)
+        
+        sampled_items = [self.items[i] for i in indices]
+        return sampled_items + self.base_batch
+
+class BalancedTaskSampler:
+    """
+    Samples a batch of tasks from a metaworld benchmark, ensuring that the
+    number of tasks from each environment type is as balanced as possible.
+    """
+    def __init__(self, benchmark, batch_size: int, test: bool =False):
+        self.batch_size = batch_size
+        
+        # 1. Group tasks by their environment name
+        classes = benchmark.test_classes if test else benchmark.train_classes
+        tasks = benchmark.test_tasks if test else benchmark.train_tasks
+        env_names = list(classes.keys())
+        tasks_by_env = defaultdict(list)
+        for task in tasks:
+            tasks_by_env[task.env_name].append(task)
+            
+        # 2. Create a sampler for environment types (e.g., 'reach-v2', 'push-v2')
+        self.env_type_sampler = _InfiniteSampler(env_names, self.batch_size)
+        
+        # 3. Create a sampler for each environment's specific tasks (e.g., different goals)
+        self.task_samplers = {
+            name: _InfiniteSampler(tasks, 1) for name, tasks in tasks_by_env.items()
+        }
+
+    def __iter__(self) -> Iterator:
+        return self
+    
+    def __next__(self) -> List[Any]:
+        """Samples one balanced batch of tasks."""
+        # Stage 1: Sample a balanced batch of environment names
+        sampled_env_types = next(self.env_type_sampler)
+        random.shuffle(sampled_env_types) # Shuffle to mix base and sampled items
+        
+        # Stage 2: For each env name, sample one specific task
+        # The internal sampler yields a list of size 1, so we take the first element.
+        batch = [next(self.task_samplers[name])[0] for name in sampled_env_types]
+        return batch
 
 class MetaWorldML10(l2l.gym.MetaEnv):
     """
     Wrapper for the Meta-World ML10 benchmark to make it compatible
     with the learn2learn MetaEnv interface.
     """
-    def __init__(self, seed=None):
+    def __init__(self, seed=None, test=False):
+        self.test = test
         self.ml10 = metaworld.ML10(seed=seed)
         self.train_tasks = self.ml10.train_tasks
         self._active_env = None
         # Set an initial task to define spaces
-        self.set_task(self.sample_tasks(1)[0])
-
+        task = self.ml10.test_tasks if test else self.ml10.train_tasks
+        self.set_task(task[0])
+       
     @property
     def observation_space(self):
         return self._active_env.observation_space
@@ -47,15 +127,12 @@ class MetaWorldML10(l2l.gym.MetaEnv):
     def set_task(self, task):
         """Sets the active environment based on the task description."""
         env_name = task.env_name
-        env_cls = self.ml10.train_classes[env_name]
+        classes = self.ml10.test_classes if self.test else self.ml10.train_classes
+        env_cls = classes[env_name]
         self._active_env = env_cls()
         self._active_env.set_task(task)
         self._active_env.reset() 
         return True
-
-    def sample_tasks(self, num_tasks):
-        """Samples a list of tasks from the ML10 training set."""
-        return random.choices(self.train_tasks, k=num_tasks)
 
     def step(self, action):
         obs, reward, terminated, truncated, info = self._active_env.step(action)
@@ -152,6 +229,12 @@ def meta_surrogate_loss(iteration_replays, iteration_policies, policy, baseline,
     mean_loss /= len(iteration_replays)
     return mean_loss, mean_kl
 
+def make_env(test=False):
+    def fn():
+        env = MetaWorldML10(seed=42, test=test)
+        env = ch.envs.ActionSpaceScaler(env)
+        return env
+    return fn
 
 def main(
         adapt_lr=0.1,
@@ -163,28 +246,44 @@ def main(
         tau=1.00,
         gamma=0.99,
         seed=42,
-        num_workers=4,
+        num_workers=10,
         cuda=True,
 ):
     cuda = bool(cuda)
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    device_name = 'cuda:2' if cuda and torch.cuda.is_available() else 'cpu'
+    device_name = 'cuda:3' if cuda and torch.cuda.is_available() else 'cpu'
     device = torch.device(device_name)
     if cuda:
         torch.cuda.manual_seed(seed)
 
-    def make_env():
-        env = MetaWorldML10(seed=seed)
-        env = ch.envs.ActionSpaceScaler(env)
-        return env
+    # Initialize W&B
+    wandb.init(
+        project="l2l-metaworld-ml10-maml-trpo",
+        config={
+            "adapt_lr": adapt_lr,
+            "meta_lr": meta_lr,
+            "adapt_steps": adapt_steps,
+            "num_iterations": num_iterations,
+            "meta_bsz": meta_bsz,
+            "adapt_bsz": adapt_bsz,
+            "tau": tau,
+            "gamma": gamma,
+            "seed": seed,
+        }
+    )
 
-    dummy_env = make_env()
+    benchmark = metaworld.ML10(seed=seed)
+    task_sampler = BalancedTaskSampler(benchmark, batch_size=meta_bsz)
+
+    dummy_task = next(task_sampler)[0]
+    dummy_env = benchmark.train_classes[dummy_task.env_name]()
+    dummy_env.set_task(dummy_task)
     state_size = dummy_env.observation_space.shape[0]
     action_size = dummy_env.action_space.shape[0]
 
-    env = l2l.gym.AsyncVectorEnv([make_env for _ in range(num_workers)])
+    env = l2l.gym.AsyncVectorEnv([make_env() for _ in range(num_workers)])
     env.seed(seed)
     env = ch.envs.Torch(env)
     
@@ -199,7 +298,7 @@ def main(
         iteration_policies = []
 
         # Sample tasks and collect data
-        tasks = env.sample_tasks(meta_bsz)
+        tasks = next(task_sampler)
         for task_config in tqdm(tasks, leave=False, desc='Data Collection'):
             clone = deepcopy(policy)
             env.set_task(task_config)
@@ -271,5 +370,102 @@ def main(
                     p.data.add_(u.data, alpha=-stepsize)
                 break
 
+        if iteration % 30 == 0:
+            evaluate(benchmark, policy, baseline, adapt_lr, gamma, tau, num_workers, seed, cuda)
+
+    path = "model/maml_ml.pth"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    checkpoint = {
+        'policy_state_dict': policy.state_dict(),
+        'baseline_state_dict': baseline.state_dict(),
+    }
+    
+    torch.save(checkpoint, path)
+    print(f"Checkpoint saved successfully to {path}")
+
+def evaluate(benchmark, policy, baseline, adapt_lr, gamma, tau, n_workers, seed, cuda):
+    device_name = 'cpu'
+    if cuda:
+        device_name = 'cuda:3'
+    device = torch.device(device_name)
+
+    # Parameters
+    adapt_steps = 3
+    adapt_bsz = 10
+    n_eval_tasks = 10
+
+    tasks_reward = 0
+
+    env = make_env(test=True)()
+    env = ch.envs.Torch(env)
+    benchmark = metaworld.ML10(seed=seed)
+    task_sampler = BalancedTaskSampler(benchmark, batch_size=n_eval_tasks, test=True)
+    results_by_class = defaultdict(list)
+    for i, task in enumerate(next(task_sampler)):
+        clone = deepcopy(policy)
+        clone.to(device)
+        env.set_task(task)
+        env.reset()
+        task_run = ch.envs.Runner(env)
+
+        # Adapt
+        for step in range(adapt_steps):
+            adapt_episodes = task_run.run(clone, episodes=adapt_bsz)
+            if cuda:
+                adapt_episodes = adapt_episodes.to(device, non_blocking=True)
+            clone = fast_adapt_a2c(clone, adapt_episodes, adapt_lr, baseline, gamma, tau, first_order=True)
+
+        eval_episodes = task_run.run(clone, episodes=adapt_bsz)
+
+        task_reward = eval_episodes.reward().sum().item() / adapt_bsz
+        '''
+        Change the run method in the Runner class
+        state, reward, done, step_info = self.env.step(action)
+        if isinstance(step_info, tuple):
+            step_info = step_info[0]
+        info["success"] = step_info["success"]
+        '''
+        task_success = eval_episodes.success().cpu().numpy().flatten()
+        task_done = eval_episodes.done().cpu().numpy().flatten()
+        num_episodes, successful_episodes, start_idx = 0, 0, 0
+        end_indices = np.where(task_done == 1)[0]
+        if len(end_indices) > 0:
+            num_episodes = len(end_indices)
+            for end_idx in end_indices:
+                if np.any(task_success[start_idx:end_idx + 1] > 0):
+                    successful_episodes += 1
+                start_idx = end_idx + 1
+            task_success_rate = successful_episodes / num_episodes
+        else:
+            task_success_rate = 0.0
+        print("Success", task_success_rate)
+        results_by_class[f"{task.env_name}_success_rate"].append(task_success_rate)
+        tasks_reward += task_reward
+
+    final_eval_reward = tasks_reward / n_eval_tasks
+    
+    print(f"Average reward over {n_eval_tasks} test tasks: {final_eval_reward}")
+    num_train_tasks = 5
+    for i in range(adapt_bsz//num_train_tasks):
+        res = {}
+        for env_name, successes in results_by_class.items():
+            res[env_name] = successes[i]
+        wandb.log(res)
+    return final_eval_reward
+
+
 if __name__ == '__main__':
-    main()
+    main(
+        adapt_lr=0.008342,
+        meta_lr=1.919,
+        adapt_steps=5,
+        meta_bsz=10,
+        adapt_bsz=30,
+        tau=0.9344,
+        gamma=0.9087,
+        seed=42,
+        num_workers=10,
+        cuda=True,
+    )
+
+

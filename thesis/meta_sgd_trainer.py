@@ -4,6 +4,7 @@ Core implementation of the Meta-SGD algorithm with A2C, encapsulated in a reusab
 This script can be run directly for a single experiment.
 """
 import random
+import os
 from typing import Iterator, Dict, Any
 
 import cherry as ch
@@ -100,7 +101,7 @@ class MetaSGDTrainer:
         self.device = torch.device('cpu')
         if self.cuda and torch.cuda.is_available():
             torch.cuda.manual_seed(self.seed)
-            self.device = torch.device('cuda')
+            self.device = torch.device('cuda:2')
 
         # Create a dummy env to get observation and action shapes
         def make_env():
@@ -178,21 +179,57 @@ class MetaSGDTrainer:
                 'meta_loss': meta_loss.item(),
             }
 
+    def save_model(self, path: str):
+        """Saves the meta-learner's state dictionary to a file."""
+        # Ensure the directory exists
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        checkpoint = {
+            'meta_learner_state_dict': self.meta_learner.state_dict(),
+            'baseline_state_dict': self.baseline.state_dict(),
+        }
+        
+        torch.save(checkpoint, path)
+        print(f"Checkpoint saved successfully to {path}")
+
+    def load_model(self, path: str):
+        """Loads the meta-learner's state dictionary from a file."""
+        if not os.path.exists(path):
+            print(f"Warning: Model file not found at {path}. Starting from scratch.")
+            return
+        checkpoint = torch.load(path, map_location=self.device)
+        
+        self.meta_learner.load_state_dict(checkpoint['meta_learner_state_dict'])
+        self.baseline.load_state_dict(checkpoint['baseline_state_dict'])
+
+        print(f"Checkpoint loaded successfully from {path}")
+
 if __name__ == '__main__':
+    import wandb
     # This block allows running the script directly for a single experiment
     try:
         trainer = MetaSGDTrainer(
             env_name='AntDirection-v1',
-            num_workers=8,
-            meta_bsz=10,
-            cuda=True,
+            fast_lr_init = 0.08139,
+            meta_lr = 0.004335,
+            adapt_steps = 1,
+            meta_bsz = 20,
+            adapt_bsz = 40,
+            tau = 1.00,
+            gamma = 0.962,
+            seed = 42,
+            num_workers = 10,
+            cuda = True,
         )
-        for metrics in trainer.train(num_iterations=1000):
+        wandb.init()
+        for metrics in trainer.train(num_iterations=600):
+            wandb.log(metrics)
             print(
                 f"Iteration {metrics['iteration'] + 1}: "
                 f"Reward = {metrics['adaptation_reward']:.4f}, "
                 f"Meta Loss = {metrics['meta_loss']:.4f}"
             )
+        save_path = "model/meta_sgd.pth"
+        trainer.save_model(save_path)
     except gym.error.DependencyNotInstalled:
         print("="*60)
         print("This example requires Mujoco. Please see the MAML-TRPO trainer for installation notes.")

@@ -85,7 +85,7 @@ def main():
     parser.add_argument(
         "-r", "--total_runs",
         type=int,
-        default=20,
+        default=15,
         help="Total number of hyperparameter combinations to try across all agents."
     )
     parser.add_argument(

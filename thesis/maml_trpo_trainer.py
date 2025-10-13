@@ -7,6 +7,7 @@ This script can be run directly for a single experiment.
 
 import random
 from copy import deepcopy
+import os
 
 import cherry as ch
 import gym
@@ -93,7 +94,7 @@ def meta_surrogate_loss(iteration_replays, iteration_policies, policy, baseline,
 class MAMLTRPOTrainer:
     def __init__(
         self,
-        env_name='AntDirection-v1',
+        env_name='HalfCheetahForwardBackward-v1',
         adapt_lr=0.1,
         meta_lr=1.0,
         adapt_steps=1,
@@ -159,7 +160,7 @@ class MAMLTRPOTrainer:
                     if self.cuda:
                         train_episodes.to(self.device, non_blocking=True)
                     clone = fast_adapt_a2c(clone, train_episodes, self.adapt_lr,
-                                           self.baseline, self.gamma, self.tau, first_order=True)
+                                           self.baseline, self.gamma, self.tau, first_order=False)
                     task_replay.append(train_episodes)
 
                 valid_episodes = task.run(clone, episodes=self.adapt_bsz)
@@ -212,10 +213,60 @@ class MAMLTRPOTrainer:
                 for p, u in zip(self.policy.parameters(), step):
                     p.data.add_(-stepsize, u.data)
                 break
+    
+    def save_model(self, path: str):
+        """Saves the meta-learner's state dictionary to a file."""
+        # Ensure the directory exists
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        checkpoint = {
+            'meta_learner_state_dict': self.meta_learner.state_dict(),
+            'baseline_state_dict': self.baseline.state_dict(),
+        }
+        
+        torch.save(checkpoint, path)
+        print(f"Checkpoint saved successfully to {path}")
 
+    def load_model(self, path: str):
+        """Loads the meta-learner's state dictionary from a file."""
+        if not os.path.exists(path):
+            print(f"Warning: Model file not found at {path}. Starting from scratch.")
+            return
+        checkpoint = torch.load(path, map_location=self.device)
+        
+        self.meta_learner.load_state_dict(checkpoint['meta_learner_state_dict'])
+        self.baseline.load_state_dict(checkpoint['baseline_state_dict'])
+
+        print(f"Checkpoint loaded successfully from {path}")
 
 if __name__ == '__main__':
+    import wandb
     # This block allows running the script directly for a single experiment
-    trainer = MAMLTRPOTrainer(num_iterations=1000)
-    for metrics in trainer.train():
-        print(f"Iteration {metrics['iteration']}: Reward = {metrics['adaptation_reward']:.4f}")
+    try:
+        trainer = MAMLTRPOTrainer(
+            env_name='HalfCheetahForwardBackward-v1',
+            adapt_lr=0.008342,
+            meta_lr=1.919,
+            adapt_steps=5,
+            meta_bsz=25,
+            adapt_bsz=30,
+            tau=0.9344,
+            gamma=0.9087,
+            seed=42,
+            num_workers=10,
+            cuda=True,
+        )
+        wandb.init()
+        for metrics in trainer.train(num_iterations=600):
+            wandb.log(metrics)
+            print(
+                f"Iteration {metrics['iteration'] + 1}: "
+                f"Reward = {metrics['adaptation_reward']:.4f}, "
+            )
+        save_path = "model/maml_trpo_half.pth"
+        trainer.save_model(save_path)
+    except gym.error.DependencyNotInstalled:
+        print("="*60)
+        print("This example requires Mujoco. Please see the MAML-TRPO trainer for installation notes.")
+        print("="*60)
+    except Exception as e:
+        print(f"An error occurred: {e}")
