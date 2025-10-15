@@ -253,7 +253,7 @@ def main(
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    device_name = 'cuda:3' if cuda and torch.cuda.is_available() else 'cpu'
+    device_name = 'cuda' if cuda and torch.cuda.is_available() else 'cpu'
     device = torch.device(device_name)
     if cuda:
         torch.cuda.manual_seed(seed)
@@ -386,7 +386,7 @@ def main(
 def evaluate(benchmark, policy, baseline, adapt_lr, gamma, tau, n_workers, seed, cuda):
     device_name = 'cpu'
     if cuda:
-        device_name = 'cuda:3'
+        device_name = 'cuda'
     device = torch.device(device_name)
 
     # Parameters
@@ -455,14 +455,16 @@ def evaluate(benchmark, policy, baseline, adapt_lr, gamma, tau, n_workers, seed,
 
 
 if __name__ == '__main__':
+    os.environ['CUDA_VISIBLE_DEVICES'] = str(2)
     main(
-        adapt_lr=0.008342,
-        meta_lr=1.919,
-        adapt_steps=5,
+        num_iterations=600,
+        adapt_lr=0.1119,
+        meta_lr=0.9987,
+        adapt_steps=2,
         meta_bsz=10,
-        adapt_bsz=30,
-        tau=0.9344,
-        gamma=0.9087,
+        adapt_bsz=40,
+        tau=0.9941,
+        gamma=0.9886,
         seed=42,
         num_workers=10,
         cuda=True,

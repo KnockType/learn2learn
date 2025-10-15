@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 from gym.envs.registration import register
-
 from .subproc_vec_env import SubprocVecEnv
 
 # 2D Navigation
@@ -44,4 +43,11 @@ register(
     'HumanoidDirection-v1',
     entry_point='learn2learn.gym.envs.mujoco.humanoid_direction:HumanoidDirectionEnv',
     max_episode_steps=200,
+)
+
+# Custom
+register(
+    'RampPush-v0',
+    entry_point='learn2learn.gym.envs.custom.ramp_push:RampPushEnv',
+    max_episode_steps=200
 )

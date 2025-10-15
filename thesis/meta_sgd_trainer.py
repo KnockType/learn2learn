@@ -101,7 +101,7 @@ class MetaSGDTrainer:
         self.device = torch.device('cpu')
         if self.cuda and torch.cuda.is_available():
             torch.cuda.manual_seed(self.seed)
-            self.device = torch.device('cuda:2')
+            self.device = torch.device('cuda')
 
         # Create a dummy env to get observation and action shapes
         def make_env():
@@ -207,8 +207,10 @@ if __name__ == '__main__':
     import wandb
     # This block allows running the script directly for a single experiment
     try:
+        os.environ['CUDA_VISIBLE_DEVICES'] = str(3)
+        envname = 'RampPush-v0'
         trainer = MetaSGDTrainer(
-            env_name='AntDirection-v1',
+            env_name=envname,
             fast_lr_init = 0.08139,
             meta_lr = 0.004335,
             adapt_steps = 1,
@@ -228,7 +230,7 @@ if __name__ == '__main__':
                 f"Reward = {metrics['adaptation_reward']:.4f}, "
                 f"Meta Loss = {metrics['meta_loss']:.4f}"
             )
-        save_path = "model/meta_sgd.pth"
+        save_path = f"model/meta_sgd_{envname}.pth"
         trainer.save_model(save_path)
     except gym.error.DependencyNotInstalled:
         print("="*60)

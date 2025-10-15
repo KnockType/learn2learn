@@ -11,6 +11,7 @@ import os
 
 import cherry as ch
 import gym
+import gymnasium
 import numpy as np
 import torch
 from cherry.algorithms import a2c, trpo
@@ -22,6 +23,7 @@ from tqdm import tqdm
 
 import learn2learn as l2l
 from examples.rl.policies import DiagNormalPolicy
+import learn2learn.gym.envs.custom
 
 # --- Helper Functions (unchanged from original script) ---
 
@@ -242,15 +244,17 @@ if __name__ == '__main__':
     import wandb
     # This block allows running the script directly for a single experiment
     try:
+        envname = 'RampPush-v0'
+        os.environ['CUDA_VISIBLE_DEVICES'] = str(3)
         trainer = MAMLTRPOTrainer(
-            env_name='HalfCheetahForwardBackward-v1',
-            adapt_lr=0.008342,
-            meta_lr=1.919,
-            adapt_steps=5,
-            meta_bsz=25,
-            adapt_bsz=30,
-            tau=0.9344,
-            gamma=0.9087,
+            env_name=envname,
+            adapt_lr=0.1119,
+            meta_lr=0.9987,
+            adapt_steps=2,
+            meta_bsz=40,
+            adapt_bsz=40,
+            tau=0.9941,
+            gamma=0.9886,
             seed=42,
             num_workers=10,
             cuda=True,
@@ -262,7 +266,7 @@ if __name__ == '__main__':
                 f"Iteration {metrics['iteration'] + 1}: "
                 f"Reward = {metrics['adaptation_reward']:.4f}, "
             )
-        save_path = "model/maml_trpo_half.pth"
+        save_path = f"model/maml_trpo_{envname}.pth"
         trainer.save_model(save_path)
     except gym.error.DependencyNotInstalled:
         print("="*60)
