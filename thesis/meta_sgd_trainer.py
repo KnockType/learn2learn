@@ -129,7 +129,7 @@ class MetaSGDTrainer:
         # Key difference: Use a standard optimizer for the meta-parameters
         self.meta_optimizer = optim.Adam(self.meta_learner.parameters(), lr=self.meta_lr)
 
-    def train(self, num_iterations: int = 1000) -> Iterator[Dict[str, Any]]:
+    def train(self, num_iterations: int = 300) -> Iterator[Dict[str, Any]]:
         """
         Starts the training process. Yields metrics at each iteration.
         """
@@ -218,7 +218,7 @@ if __name__ == '__main__':
             adapt_bsz = 40,
             tau = 1.00,
             gamma = 0.962,
-            seed = 42,
+            seed = 4,
             num_workers = 10,
             cuda = True,
         )

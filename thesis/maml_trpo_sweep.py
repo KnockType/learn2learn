@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import os
-
+import time
 """
 A script to create and run a parallel Weights & Biases sweep
 by loading the configuration from a YAML file.
@@ -25,7 +25,8 @@ def train_for_sweep():
     This is the core training function that will be called by `wandb.agent`.
     It initializes a wandb run and then executes the training logic.
     """
-    wandb.init()
+    
+    wandb.init(name=f"maml_sweep_{time.time()}")
     config = wandb.config
 
     trainer = MAMLTRPOTrainer(
@@ -38,7 +39,7 @@ def train_for_sweep():
         meta_bsz=config.meta_bsz,
     )
 
-    for metrics in trainer.train(num_iterations=50):
+    for metrics in trainer.train(num_iterations=60):
         wandb.log(metrics)
 
 
@@ -68,7 +69,7 @@ def main():
     parser.add_argument(
         "--project",
         type=str,
-        default="maml_trpo_sweep",
+        default=f"meta-rl-sweeps-{time.time()}",
         help="The wandb project name to use for the sweep."
     )
     parser.add_argument(
@@ -85,7 +86,7 @@ def main():
     parser.add_argument(
         "-r", "--total_runs",
         type=int,
-        default=15,
+        default=40,
         help="Total number of hyperparameter combinations to try across all agents."
     )
     parser.add_argument(
@@ -115,7 +116,7 @@ def main():
     sweep_id = wandb.sweep(
         sweep=sweep_configuration,
         project=args.project,
-        entity=args.entity
+        entity=args.entity,
     )
     print(f"Sweep created successfully! Sweep ID: {sweep_id}")
     print(f"Launching {args.num_agents} agents to run a total of {args.total_runs} trials.")

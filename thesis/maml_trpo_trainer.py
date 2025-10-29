@@ -104,7 +104,7 @@ class MAMLTRPOTrainer:
         adapt_bsz=20,
         tau=1.00,
         gamma=0.95,
-        seed=42,
+        seed=9,
         num_workers=10,
         cuda=True,
     ):
@@ -221,7 +221,7 @@ class MAMLTRPOTrainer:
         # Ensure the directory exists
         os.makedirs(os.path.dirname(path), exist_ok=True)
         checkpoint = {
-            'meta_learner_state_dict': self.meta_learner.state_dict(),
+            'policy_state_dict': self.policy.state_dict(),
             'baseline_state_dict': self.baseline.state_dict(),
         }
         
@@ -235,7 +235,7 @@ class MAMLTRPOTrainer:
             return
         checkpoint = torch.load(path, map_location=self.device)
         
-        self.meta_learner.load_state_dict(checkpoint['meta_learner_state_dict'])
+        self.policy.load_state_dict(checkpoint['policy_state_dict'])
         self.baseline.load_state_dict(checkpoint['baseline_state_dict'])
 
         print(f"Checkpoint loaded successfully from {path}")
@@ -244,8 +244,10 @@ if __name__ == '__main__':
     import wandb
     # This block allows running the script directly for a single experiment
     try:
-        envname = 'RampPush-v0'
-        os.environ['CUDA_VISIBLE_DEVICES'] = str(3)
+        seed = 1
+        envname = 'AntForwardBackward-v1'
+        save_interval = 100
+        os.environ['CUDA_VISIBLE_DEVICES'] = str(5)
         trainer = MAMLTRPOTrainer(
             env_name=envname,
             adapt_lr=0.1119,
@@ -255,18 +257,22 @@ if __name__ == '__main__':
             adapt_bsz=40,
             tau=0.9941,
             gamma=0.9886,
-            seed=42,
+            seed=seed,
             num_workers=10,
             cuda=True,
         )
-        wandb.init()
-        for metrics in trainer.train(num_iterations=600):
+        wandb.init(project=f"maml_trpo_{envname}_", name=f"seed_{seed}")
+        for metrics in trainer.train(num_iterations=500):
             wandb.log(metrics)
             print(
                 f"Iteration {metrics['iteration'] + 1}: "
                 f"Reward = {metrics['adaptation_reward']:.4f}, "
             )
-        save_path = f"model/maml_trpo_{envname}.pth"
+            current_iteration = metrics['iteration'] + 1
+            if current_iteration % save_interval == 0:
+                save_path = f"model/maml_trpo_{envname}_{seed}_iter{current_iteration}.pth"
+                trainer.save_model(save_path)
+        save_path = f"model/maml_trpo_{envname}_{seed}.pth"
         trainer.save_model(save_path)
     except gym.error.DependencyNotInstalled:
         print("="*60)

@@ -101,6 +101,54 @@ class BalancedTaskSampler:
         # The internal sampler yields a list of size 1, so we take the first element.
         batch = [next(self.task_samplers[name])[0] for name in sampled_env_types]
         return batch
+    
+class MetaWorldML1(l2l.gym.MetaEnv):
+    """
+    Wrapper for the Meta-World ML1 benchmark to make it compatible
+    with the learn2learn MetaEnv interface.
+    """
+    def __init__(self, env_name: str, seed=None, test=False):
+        self.test = test
+        self.ml1 = metaworld.ML1(env_name, seed=seed)
+        
+        # Select the correct task list
+        tasks = self.ml1.test_tasks if test else self.ml1.train_tasks
+        self.tasks = tasks
+        
+        self._active_env = None
+        # Set an initial task to define observation and action spaces
+        self.set_task(tasks[0])
+       
+    @property
+    def observation_space(self):
+        return self._active_env.observation_space
+
+    @property
+    def action_space(self):
+        return self._active_env.action_space
+
+    def set_task(self, task):
+        """Sets the active environment based on the task description."""
+        env_name = task.env_name
+        env_cls = self.ml1.test_classes[env_name] if self.test else self.ml1.train_classes[env_name]
+        self._active_env = env_cls()
+        self._active_env.set_task(task)
+        self._active_env.reset()
+        return True
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self._active_env.step(action)
+        done = terminated or truncated
+        return obs, reward, done, info
+    
+    def reset(self, **kwargs):
+        obs, info = self._active_env.reset(**kwargs)
+        return obs
+
+    def render(self, **kwargs):
+        return self._active_env.render(**kwargs)
+
+
 
 class MetaWorldML10(l2l.gym.MetaEnv):
     """
@@ -229,14 +277,20 @@ def meta_surrogate_loss(iteration_replays, iteration_policies, policy, baseline,
     mean_loss /= len(iteration_replays)
     return mean_loss, mean_kl
 
-def make_env(test=False):
+env_name = "door-close-v3"
+
+def make_env(bench="ML1", test=False):
     def fn():
-        env = MetaWorldML10(seed=42, test=test)
+        if bench=="ML1":
+            env = MetaWorldML1(env_name, seed=4, test=test)
+        else:
+            env = MetaWorldML10(seed=4, test=test)
         env = ch.envs.ActionSpaceScaler(env)
         return env
     return fn
 
 def main(
+        bench="ML1",
         adapt_lr=0.1,
         meta_lr=1.0,
         adapt_steps=1,
@@ -274,7 +328,7 @@ def main(
         }
     )
 
-    benchmark = metaworld.ML10(seed=seed)
+    benchmark = metaworld.ML10(seed=seed) if bench=="ML10" else metaworld.ML1(env_name, seed=seed)
     task_sampler = BalancedTaskSampler(benchmark, batch_size=meta_bsz)
 
     dummy_task = next(task_sampler)[0]
@@ -398,7 +452,6 @@ def evaluate(benchmark, policy, baseline, adapt_lr, gamma, tau, n_workers, seed,
 
     env = make_env(test=True)()
     env = ch.envs.Torch(env)
-    benchmark = metaworld.ML10(seed=seed)
     task_sampler = BalancedTaskSampler(benchmark, batch_size=n_eval_tasks, test=True)
     results_by_class = defaultdict(list)
     for i, task in enumerate(next(task_sampler)):
@@ -455,7 +508,7 @@ def evaluate(benchmark, policy, baseline, adapt_lr, gamma, tau, n_workers, seed,
 
 
 if __name__ == '__main__':
-    os.environ['CUDA_VISIBLE_DEVICES'] = str(2)
+    os.environ['CUDA_VISIBLE_DEVICES'] = str(4)
     main(
         num_iterations=600,
         adapt_lr=0.1119,
@@ -465,7 +518,7 @@ if __name__ == '__main__':
         adapt_bsz=40,
         tau=0.9941,
         gamma=0.9886,
-        seed=42,
+        seed=4,
         num_workers=10,
         cuda=True,
     )

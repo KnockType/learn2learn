@@ -18,19 +18,19 @@ register(
 register(
     'HalfCheetahForwardBackward-v1',
     entry_point='learn2learn.gym.envs.mujoco.halfcheetah_forward_backward:HalfCheetahForwardBackwardEnv',
-    max_episode_steps=100,
+    max_episode_steps=200,
 )
 
 register(
     'AntForwardBackward-v1',
     entry_point='learn2learn.gym.envs.mujoco.ant_forward_backward:AntForwardBackwardEnv',
-    max_episode_steps=100,
+    max_episode_steps=200,
 )
 
 register(
     'AntDirection-v1',
     entry_point='learn2learn.gym.envs.mujoco.ant_direction:AntDirectionEnv',
-    max_episode_steps=100,
+    max_episode_steps=200,
 )
 
 register(
