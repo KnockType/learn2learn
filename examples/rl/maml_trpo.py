@@ -111,14 +111,14 @@ def main(
         adapt_lr=0.1,
         meta_lr=1.0,
         adapt_steps=1,
-        num_iterations=1000,
-        meta_bsz=20,
-        adapt_bsz=20,
+        num_iterations=500,
+        meta_bsz=40,
+        adapt_bsz=40,
         tau=1.00,
         gamma=0.95,
-        seed=42,
+        seed=808,
         num_workers=10,
-        cuda=0,
+        cuda=1,
 ):
     cuda = bool(cuda)
     random.seed(seed)
@@ -220,4 +220,6 @@ def main(
 
 
 if __name__ == '__main__':
-    main()
+    import os
+    os.environ['CUDA_VISIBLE_DEVICES'] = str(2)
+    main(env_name="RampPush-v0")

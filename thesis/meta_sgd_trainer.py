@@ -19,10 +19,8 @@ from tqdm import tqdm
 import learn2learn as l2l
 from examples.rl.policies import DiagNormalPolicy
 
-# --- Helper Functions (Identical to MAML-TRPO's inner loop loss) ---
-
 def compute_advantages(baseline, tau, gamma, rewards, dones, states, next_states):
-    """Computes the GAE advantages."""
+    # Update baseline
     returns = ch.td.discount(gamma, rewards, dones)
     baseline.fit(states, returns)
     values = baseline(states)
@@ -36,19 +34,20 @@ def compute_advantages(baseline, tau, gamma, rewards, dones, states, next_states
                                        values=bootstraps,
                                        next_value=next_value)
 
-def a2c_loss(episodes, learner, baseline, gamma, tau):
-    """Computes the A2C loss for both inner and outer loops."""
-    states = episodes.state()
-    actions = episodes.action()
-    rewards = episodes.reward()
-    dones = episodes.done()
-    next_states = episodes.next_state()
+
+def maml_a2c_loss(train_episodes, learner, baseline, gamma, tau):
+    # Update policy and baseline
+    states = train_episodes.state()
+    actions = train_episodes.action()
+    rewards = train_episodes.reward()
+    dones = train_episodes.done()
+    next_states = train_episodes.next_state()
     log_probs = learner.log_prob(states, actions)
     advantages = compute_advantages(baseline, tau, gamma, rewards,
                                     dones, states, next_states)
-    advantages = advantages.to(log_probs.device)
     advantages = ch.normalize(advantages).detach()
     return a2c.policy_loss(log_probs, advantages)
+
 
 # --- Core Trainer Class ---
 
@@ -123,8 +122,8 @@ class MetaSGDTrainer:
         self.meta_learner = l2l.algorithms.MetaSGD(policy, lr=fast_lr_init, first_order=False)
         self.baseline = LinearValue(state_size, action_size)
         
-        self.meta_learner.to(self.device)
-        self.baseline.to(self.device)
+        self.meta_learner = self.meta_learner.to(self.device)
+        self.baseline = self.baseline.to(self.device)
 
         # Key difference: Use a standard optimizer for the meta-parameters
         self.meta_optimizer = optim.Adam(self.meta_learner.parameters(), lr=self.meta_lr)
@@ -134,42 +133,35 @@ class MetaSGDTrainer:
         Starts the training process. Yields metrics at each iteration.
         """
         for iteration in range(num_iterations):
-            self.meta_optimizer.zero_grad()
             iteration_reward = 0.0
             iteration_meta_loss = 0.0
 
-            with tqdm(total=self.meta_bsz, desc=f'Iteration {iteration+1}/{num_iterations}', leave=False) as pbar:
-                for task_i in range(self.meta_bsz):
-                    # 1. Sample a new task
-                    task_config = self.env.sample_tasks(1)[0]
-                    self.env.set_task(task_config)
-                    self.env.reset()
-                    task = ch.envs.Runner(self.env)
+            for task_config in tqdm(self.env.sample_tasks(self.meta_bsz)):
+                learner = self.meta_learner.clone()
+                learner = learner.to(self.device)
+                self.env.set_task(task_config)
+                self.env.reset()
+                task = ch.envs.Runner(self.env)
                     
-                    # 2. Create a clone of the meta-learner
-                    learner = self.meta_learner.clone()
+                for step in range(self.adapt_steps):
+                    train_episodes = task.run(learner, episodes=self.adapt_bsz)
+                    train_episodes = train_episodes.to(self.device)
+                    inner_loss = maml_a2c_loss(train_episodes, learner, self.baseline, self.gamma, self.tau)
+                    learner.adapt(inner_loss)
 
-                    # 3. Inner loop adaptation
-                    for step in range(self.adapt_steps):
-                        train_episodes = task.run(learner, episodes=self.adapt_bsz)
-                        train_episodes = train_episodes.to(self.device)
-                        inner_loss = a2c_loss(train_episodes, learner, self.baseline, self.gamma, self.tau)
-                        learner.adapt(inner_loss)
-
-                    # 4. Compute meta-loss on validation episodes
-                    valid_episodes = task.run(learner, episodes=self.adapt_bsz)
-                    valid_episodes = valid_episodes.to(self.device)
-                    meta_loss = a2c_loss(valid_episodes, learner, self.baseline, self.gamma, self.tau)
+                valid_episodes = task.run(learner, episodes=self.adapt_bsz)
+                valid_episodes = valid_episodes.to(self.device)
+                meta_loss = maml_a2c_loss(valid_episodes, learner, self.baseline, self.gamma, self.tau)
                     
-                    iteration_reward += valid_episodes.reward().sum().item() / self.adapt_bsz
-                    iteration_meta_loss += meta_loss
-                    pbar.update(1)
+                iteration_meta_loss += meta_loss
+                iteration_reward += valid_episodes.reward().sum().item() / self.adapt_bsz
 
             # 5. Meta-optimization step
             adaptation_reward = iteration_reward / self.meta_bsz
             meta_loss = iteration_meta_loss / self.meta_bsz
             
             # Backpropagate the meta-loss and update the meta-learner
+            self.meta_optimizer.zero_grad()
             meta_loss.backward()
             self.meta_optimizer.step()
 
@@ -208,7 +200,8 @@ if __name__ == '__main__':
     # This block allows running the script directly for a single experiment
     try:
         os.environ['CUDA_VISIBLE_DEVICES'] = str(3)
-        envname = 'RampPush-v0'
+        seed = 42
+        envname = 'HalfCheetahForwardBackward-v1'
         trainer = MetaSGDTrainer(
             env_name=envname,
             fast_lr_init = 0.08139,
@@ -218,19 +211,19 @@ if __name__ == '__main__':
             adapt_bsz = 40,
             tau = 1.00,
             gamma = 0.962,
-            seed = 4,
+            seed = seed,
             num_workers = 10,
             cuda = True,
         )
-        wandb.init()
-        for metrics in trainer.train(num_iterations=600):
+        wandb.init(project=f"meta_sgd_{envname}_", name=f"seed_{seed}")
+        for metrics in trainer.train(num_iterations=500):
             wandb.log(metrics)
             print(
                 f"Iteration {metrics['iteration'] + 1}: "
                 f"Reward = {metrics['adaptation_reward']:.4f}, "
                 f"Meta Loss = {metrics['meta_loss']:.4f}"
             )
-        save_path = f"model/meta_sgd_{envname}.pth"
+        save_path = f"model/meta_sgd_{envname}_{seed}.pth"
         trainer.save_model(save_path)
     except gym.error.DependencyNotInstalled:
         print("="*60)

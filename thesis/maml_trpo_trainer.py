@@ -25,9 +25,8 @@ import learn2learn as l2l
 from examples.rl.policies import DiagNormalPolicy
 import learn2learn.gym.envs.custom
 
-# --- Helper Functions (unchanged from original script) ---
-
 def compute_advantages(baseline, tau, gamma, rewards, dones, states, next_states):
+    # Update baseline
     returns = ch.td.discount(gamma, rewards, dones)
     baseline.fit(states, returns)
     values = baseline(states)
@@ -41,7 +40,9 @@ def compute_advantages(baseline, tau, gamma, rewards, dones, states, next_states
                                        values=bootstraps,
                                        next_value=next_value)
 
+
 def maml_a2c_loss(train_episodes, learner, baseline, gamma, tau):
+    # Update policy and baseline
     states = train_episodes.state()
     actions = train_episodes.action()
     rewards = train_episodes.reward()
@@ -50,9 +51,9 @@ def maml_a2c_loss(train_episodes, learner, baseline, gamma, tau):
     log_probs = learner.log_prob(states, actions)
     advantages = compute_advantages(baseline, tau, gamma, rewards,
                                     dones, states, next_states)
-    advantages = advantages.to(log_probs.device)
     advantages = ch.normalize(advantages).detach()
     return a2c.policy_loss(log_probs, advantages)
+
 
 def fast_adapt_a2c(clone, train_episodes, adapt_lr, baseline, gamma, tau, first_order=False):
     second_order = not first_order
@@ -63,33 +64,45 @@ def fast_adapt_a2c(clone, train_episodes, adapt_lr, baseline, gamma, tau, first_
                               create_graph=second_order)
     return l2l.algorithms.maml.maml_update(clone, adapt_lr, gradients)
 
+
 def meta_surrogate_loss(iteration_replays, iteration_policies, policy, baseline, tau, gamma, adapt_lr):
     mean_loss = 0.0
     mean_kl = 0.0
-    for task_replays, old_policy in zip(iteration_replays, iteration_policies):
+    for task_replays, old_policy in tqdm(zip(iteration_replays, iteration_policies),
+                                         total=len(iteration_replays),
+                                         desc='Surrogate Loss',
+                                         leave=False):
         train_replays = task_replays[:-1]
         valid_episodes = task_replays[-1]
         new_policy = l2l.clone_module(policy)
 
+        # Fast Adapt
         for train_episodes in train_replays:
             new_policy = fast_adapt_a2c(new_policy, train_episodes, adapt_lr,
                                         baseline, gamma, tau, first_order=False)
-        states, actions = valid_episodes.state(), valid_episodes.action()
-        rewards, dones = valid_episodes.reward(), valid_episodes.done()
-        next_states = valid_episodes.next_state()
 
+        # Useful values
+        states = valid_episodes.state()
+        actions = valid_episodes.action()
+        next_states = valid_episodes.next_state()
+        rewards = valid_episodes.reward()
+        dones = valid_episodes.done()
+
+        # Compute KL
         old_densities = old_policy.density(states)
         new_densities = new_policy.density(states)
         kl = kl_divergence(new_densities, old_densities).mean()
         mean_kl += kl
 
+        # Compute Surrogate Loss
         advantages = compute_advantages(baseline, tau, gamma, rewards, dones, states, next_states)
         advantages = ch.normalize(advantages).detach()
         old_log_probs = old_densities.log_prob(actions).mean(dim=1, keepdim=True).detach()
         new_log_probs = new_densities.log_prob(actions).mean(dim=1, keepdim=True)
-        advantages = advantages.to(new_log_probs.device)
         mean_loss += trpo.policy_loss(new_log_probs, old_log_probs, advantages)
-    return mean_loss / len(iteration_replays), mean_kl / len(iteration_replays)
+    mean_kl /= len(iteration_replays)
+    mean_loss /= len(iteration_replays)
+    return mean_loss, mean_kl
 
 # --- Core Trainer Class ---
 
@@ -118,7 +131,7 @@ class MAMLTRPOTrainer:
         self.gamma = gamma
         self.seed = seed
         self.num_workers = num_workers
-        self.cuda = cuda
+        self.cuda = bool(cuda)
 
         random.seed(self.seed)
         np.random.seed(self.seed)
@@ -141,8 +154,9 @@ class MAMLTRPOTrainer:
         self.policy = DiagNormalPolicy(self.env.state_size, self.env.action_size, device=self.device)
         self.baseline = LinearValue(self.env.state_size, self.env.action_size)
         if self.cuda:
-            self.policy.to(self.device)
-            self.baseline.to(self.device)
+            self.policy = self.policy.to(self.device)
+            # Different
+            self.baseline = self.baseline.to(self.device)
 
     def train(self, num_iterations=1000):
         for iteration in range(num_iterations):
@@ -160,7 +174,7 @@ class MAMLTRPOTrainer:
                 for step in range(self.adapt_steps):
                     train_episodes = task.run(clone, episodes=self.adapt_bsz)
                     if self.cuda:
-                        train_episodes.to(self.device, non_blocking=True)
+                        train_episodes = train_episodes.to(self.device, non_blocking=True)
                     clone = fast_adapt_a2c(clone, train_episodes, self.adapt_lr,
                                            self.baseline, self.gamma, self.tau, first_order=False)
                     task_replay.append(train_episodes)
@@ -185,14 +199,14 @@ class MAMLTRPOTrainer:
         max_kl = 0.01
 
         if self.cuda:
-            self.policy.to(self.device, non_blocking=True)
-            self.baseline.to(self.device, non_blocking=True)
+            self.policy = self.policy.to(self.device, non_blocking=True)
+            self.baseline = self.baseline.to(self.device, non_blocking=True)
             iteration_replays = [[r.to(self.device, non_blocking=True) for r in task_replays] for task_replays in iteration_replays]
 
         old_loss, old_kl = meta_surrogate_loss(iteration_replays, iteration_policies, self.policy, self.baseline, self.tau, self.gamma, self.adapt_lr)
         grad = autograd.grad(old_loss, self.policy.parameters(), retain_graph=True)
         grad = parameters_to_vector([g.detach() for g in grad])
-        
+
         Fvp = trpo.hessian_vector_product(old_kl, self.policy.parameters())
         step = trpo.conjugate_gradient(Fvp, grad)
         shs = 0.5 * torch.dot(step, Fvp(step))
@@ -202,6 +216,7 @@ class MAMLTRPOTrainer:
         step_ = [torch.zeros_like(p.data) for p in self.policy.parameters()]
         vector_to_parameters(step, step_)
         step = step_
+        del old_kl, Fvp, grad
         old_loss.detach_()
 
         for ls_step in range(ls_max_steps):
@@ -244,19 +259,19 @@ if __name__ == '__main__':
     import wandb
     # This block allows running the script directly for a single experiment
     try:
-        seed = 1
-        envname = 'AntForwardBackward-v1'
+        seed = 42
+        envname = 'HalfCheetahForwardBackward-v1'
         save_interval = 100
-        os.environ['CUDA_VISIBLE_DEVICES'] = str(5)
+        os.environ['CUDA_VISIBLE_DEVICES'] = str(4)
         trainer = MAMLTRPOTrainer(
             env_name=envname,
-            adapt_lr=0.1119,
-            meta_lr=0.9987,
+            adapt_lr=0.1,
+            meta_lr=1.0,
             adapt_steps=2,
-            meta_bsz=40,
-            adapt_bsz=40,
-            tau=0.9941,
-            gamma=0.9886,
+            meta_bsz=20,
+            adapt_bsz=20,
+            tau=1.0,
+            gamma=0.95,
             seed=seed,
             num_workers=10,
             cuda=True,
