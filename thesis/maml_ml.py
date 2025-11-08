@@ -29,6 +29,13 @@ from collections import defaultdict
 import learn2learn as l2l
 from examples.rl.policies import DiagNormalPolicy # Assuming policies.py is in examples/rl/
 
+import moviepy
+
+    
+os.environ['MUJOCO_GL'] = 'egl'
+
+  
+
 class _InfiniteSampler:
     """A helper class that creates an infinite iterator to yield random batches."""
     def __init__(self, items: List[Any], batch_size: int):
@@ -107,9 +114,10 @@ class MetaWorldML1(l2l.gym.MetaEnv):
     Wrapper for the Meta-World ML1 benchmark to make it compatible
     with the learn2learn MetaEnv interface.
     """
-    def __init__(self, env_name: str, seed=None, test=False):
+    def __init__(self, env_name: str, seed=None, test=False, render_mode=None):
         self.test = test
         self.ml1 = metaworld.ML1(env_name, seed=seed)
+        self.render_mode = render_mode
         
         # Select the correct task list
         tasks = self.ml1.test_tasks if test else self.ml1.train_tasks
@@ -145,7 +153,7 @@ class MetaWorldML1(l2l.gym.MetaEnv):
         obs, info = self._active_env.reset(**kwargs)
         return obs
 
-    def render(self, **kwargs):
+    def render(self, mode="rgb_array", **kwargs):
         return self._active_env.render(**kwargs)
 
 
@@ -155,8 +163,9 @@ class MetaWorldML10(l2l.gym.MetaEnv):
     Wrapper for the Meta-World ML10 benchmark to make it compatible
     with the learn2learn MetaEnv interface.
     """
-    def __init__(self, seed=None, test=False):
+    def __init__(self, seed=None, test=False, render_mode="rgb_array"):
         self.test = test
+        self.render_mode = render_mode
         self.ml10 = metaworld.ML10(seed=seed)
         self.train_tasks = self.ml10.train_tasks
         self._active_env = None
@@ -191,8 +200,9 @@ class MetaWorldML10(l2l.gym.MetaEnv):
         obs, info = self._active_env.reset(**kwargs)
         return obs
 
-    def render(self, **kwargs):
-        return self._active_env.render(**kwargs)
+    def render(self, mode="rgb_array", **kwargs):
+        self._active_env.render_mode = mode
+        return self._active_env.render()
 
 
 def compute_advantages(baseline, tau, gamma, rewards, dones, states, next_states):
@@ -279,18 +289,18 @@ def meta_surrogate_loss(iteration_replays, iteration_policies, policy, baseline,
 
 env_name = "door-close-v3"
 
-def make_env(bench="ML1", test=False):
+def make_env(bench="ML1", test=False, render_mode=None):
     def fn():
         if bench=="ML1":
-            env = MetaWorldML1(env_name, seed=4, test=test)
+            env = MetaWorldML1(env_name, seed=4, test=test, render_mode=render_mode)
         else:
-            env = MetaWorldML10(seed=4, test=test)
+            env = MetaWorldML10(seed=4, test=test, render_mode=render_mode)
         env = ch.envs.ActionSpaceScaler(env)
         return env
     return fn
 
 def main(
-        bench="ML1",
+        bench="ML10",
         adapt_lr=0.1,
         meta_lr=1.0,
         adapt_steps=1,
@@ -314,7 +324,8 @@ def main(
 
     # Initialize W&B
     wandb.init(
-        project="l2l-metaworld-ml10-maml-trpo",
+        project=f"maml-trpo_ML10",
+        name=f"seed_{seed}",
         config={
             "adapt_lr": adapt_lr,
             "meta_lr": meta_lr,
@@ -337,13 +348,13 @@ def main(
     state_size = dummy_env.observation_space.shape[0]
     action_size = dummy_env.action_space.shape[0]
 
-    env = l2l.gym.AsyncVectorEnv([make_env() for _ in range(num_workers)])
+    env = l2l.gym.AsyncVectorEnv([make_env(bench=bench) for _ in range(num_workers)])
     env.seed(seed)
     env = ch.envs.Torch(env)
     
     policy = DiagNormalPolicy(state_size, action_size, device=device)
     if cuda:
-        policy.to(device)
+        policy = policy.to(device)
     baseline = LinearValue(state_size, action_size)
 
     for iteration in range(num_iterations):
@@ -386,8 +397,8 @@ def main(
         ls_max_steps = 15
         max_kl = 0.01
         if cuda:
-            policy.to(device, non_blocking=True)
-            baseline.to(device, non_blocking=True)
+            policy = policy.to(device, non_blocking=True)
+            baseline = baseline.to(device, non_blocking=True)
             iteration_replays = [
                 [replay.to(device, non_blocking=True) for replay in task_replays]
                 for task_replays in iteration_replays
@@ -425,9 +436,10 @@ def main(
                 break
 
         if iteration % 30 == 0:
-            evaluate(benchmark, policy, baseline, adapt_lr, gamma, tau, num_workers, seed, cuda)
+            evaluate(benchmark, policy, baseline, adapt_lr, gamma, tau, num_workers, seed, cuda, bench)
 
-    path = "model/maml_ml.pth"
+
+    path = "model/maml_{bench}_seed_{seed}.pth"
     os.makedirs(os.path.dirname(path), exist_ok=True)
     checkpoint = {
         'policy_state_dict': policy.state_dict(),
@@ -437,7 +449,7 @@ def main(
     torch.save(checkpoint, path)
     print(f"Checkpoint saved successfully to {path}")
 
-def evaluate(benchmark, policy, baseline, adapt_lr, gamma, tau, n_workers, seed, cuda):
+def evaluate(benchmark, policy, baseline, adapt_lr, gamma, tau, n_workers, seed, cuda, bench):
     device_name = 'cpu'
     if cuda:
         device_name = 'cuda'
@@ -450,16 +462,28 @@ def evaluate(benchmark, policy, baseline, adapt_lr, gamma, tau, n_workers, seed,
 
     tasks_reward = 0
 
-    env = make_env(test=True)()
+    env = make_env(bench=bench, test=True)()
     env = ch.envs.Torch(env)
     task_sampler = BalancedTaskSampler(benchmark, batch_size=n_eval_tasks, test=True)
     results_by_class = defaultdict(list)
+    video_frames = {}
+
+    curr_frame = env.unwrapped.render()
+    viewer = env._active_env.mujoco_renderer.viewer
+
+    # The camera object is an attribute of the viewer
+    camera = viewer.cam
+    print("\nChanging camera position...")
+    camera.azimuth += 45   # Rotate to the opposite side
+    camera.elevation = -50 # Look down from a steeper angle
+    camera.distance *= 1.1 # Zoom out
     for i, task in enumerate(next(task_sampler)):
         clone = deepcopy(policy)
-        clone.to(device)
+        clone = clone.to(device)
         env.set_task(task)
         env.reset()
         task_run = ch.envs.Runner(env)
+        frames = []
 
         # Adapt
         for step in range(adapt_steps):
@@ -468,6 +492,17 @@ def evaluate(benchmark, policy, baseline, adapt_lr, gamma, tau, n_workers, seed,
                 adapt_episodes = adapt_episodes.to(device, non_blocking=True)
             clone = fast_adapt_a2c(clone, adapt_episodes, adapt_lr, baseline, gamma, tau, first_order=True)
 
+        
+
+        with torch.no_grad():
+            obs = env.reset()
+            done = False
+            while not done:
+                curr_frame = env.unwrapped.render()
+                frames.append(np.transpose(curr_frame, (2, 0, 1)))
+                action = clone(obs.to(device))
+                obs, reward, done, info = env.step(action)
+        video_frames[task.env_name] = frames
         eval_episodes = task_run.run(clone, episodes=adapt_bsz)
 
         task_reward = eval_episodes.reward().sum().item() / adapt_bsz
@@ -495,6 +530,14 @@ def evaluate(benchmark, policy, baseline, adapt_lr, gamma, tau, n_workers, seed,
         results_by_class[f"{task.env_name}_success_rate"].append(task_success_rate)
         tasks_reward += task_reward
 
+
+    # Log all collected videos to W&B
+    for task_name, frames in video_frames.items():
+        if frames:
+            stacked_frames = np.stack(frames)
+            wandb.log({f"seed_{seed}_task_{task_name}": wandb.Video(stacked_frames, fps=15)})
+
+
     final_eval_reward = tasks_reward / n_eval_tasks
     
     print(f"Average reward over {n_eval_tasks} test tasks: {final_eval_reward}")
@@ -509,16 +552,9 @@ def evaluate(benchmark, policy, baseline, adapt_lr, gamma, tau, n_workers, seed,
 
 if __name__ == '__main__':
     os.environ['CUDA_VISIBLE_DEVICES'] = str(4)
+    seed = 808
     main(
-        num_iterations=600,
-        adapt_lr=0.1119,
-        meta_lr=0.9987,
-        adapt_steps=2,
-        meta_bsz=10,
-        adapt_bsz=40,
-        tau=0.9941,
-        gamma=0.9886,
-        seed=4,
+        seed=seed,
         num_workers=10,
         cuda=True,
     )

@@ -200,8 +200,8 @@ if __name__ == '__main__':
     # This block allows running the script directly for a single experiment
     try:
         os.environ['CUDA_VISIBLE_DEVICES'] = str(3)
-        seed = 42
-        envname = 'HalfCheetahForwardBackward-v1'
+        seed = 808
+        envname = 'AntDirection-v1'
         trainer = MetaSGDTrainer(
             env_name=envname,
             fast_lr_init = 0.08139,
