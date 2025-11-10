@@ -21,37 +21,41 @@ from torch import optim
 from tqdm import tqdm
 from collections import defaultdict
 from torch.utils.data import SubsetRandomSampler, BatchSampler
+from moviepy import ImageSequenceClip
 
 import learn2learn as l2l
 import metaworld
 from examples.rl.policies import DiagNormalPolicy
 
-# --- Helper Functions (Identical to MAML-TRPO's inner loop loss) ---
-
 def compute_advantages(baseline, tau, gamma, rewards, dones, states, next_states):
-    """Computes the GAE advantages."""
+    # Update baseline
     returns = ch.td.discount(gamma, rewards, dones)
     baseline.fit(states, returns)
     values = baseline(states)
     next_values = baseline(next_states)
     bootstraps = values * (1.0 - dones) + next_values * dones
     next_value = torch.zeros(1, device=values.device)
-    return ch.pg.generalized_advantage(tau, gamma, rewards, dones, bootstraps, next_value)
+    return ch.pg.generalized_advantage(tau=tau,
+                                       gamma=gamma,
+                                       rewards=rewards,
+                                       dones=dones,
+                                       values=bootstraps,
+                                       next_value=next_value)
 
-def a2c_loss(episodes, learner, baseline, gamma, tau):
-    """Computes the A2C loss for both inner and outer loops."""
-    states = episodes.state()
-    actions = episodes.action()
-    rewards = episodes.reward()
-    dones = episodes.done()
-    next_states = episodes.next_state()
+
+def maml_a2c_loss(train_episodes, learner, baseline, gamma, tau):
+    # Update policy and baseline
+    states = train_episodes.state()
+    actions = train_episodes.action()
+    rewards = train_episodes.reward()
+    dones = train_episodes.done()
+    next_states = train_episodes.next_state()
     log_probs = learner.log_prob(states, actions)
     advantages = compute_advantages(baseline, tau, gamma, rewards,
                                     dones, states, next_states)
     advantages = ch.normalize(advantages).detach()
     return a2c.policy_loss(log_probs, advantages)
 
-# --- Environment Wrappers and Task Samplers (Copied from MAML-TRPO) ---
 
 class _InfiniteSampler:
     """A helper class that creates an infinite iterator to yield random batches."""
@@ -59,72 +63,91 @@ class _InfiniteSampler:
         self.items = items
         self.num_items = len(items)
         self.batch_size = batch_size
+
+        # Guarantees each item appears at least floor(bsz / num_items) times
         self.base_batch = self.items * (self.batch_size // self.num_items)
         self.effective_batch_size = self.batch_size - len(self.base_batch)
-        self.iterator = self._create_iterator()
 
-    def _create_iterator(self):
         if self.effective_batch_size > 0:
             sampler = SubsetRandomSampler(range(self.num_items))
-            batch_sampler = BatchSampler(sampler, batch_size=self.effective_batch_size, drop_last=True)
-            return iter(batch_sampler)
-        return None
+            self.batch_sampler = BatchSampler(sampler, batch_size=self.effective_batch_size, drop_last=True)
+            self.iterator = iter(self.batch_sampler)
+        else:
+            self.iterator = None # Not needed if batch is just repetitions
 
     def __iter__(self) -> Iterator:
         return self
 
     def __next__(self) -> List[Any]:
-        if self.iterator is None:
-            return self.base_batch.copy()
+        if self.effective_batch_size == 0:
+            return self.base_batch.copy() # Return copies to avoid mutation issues
+
         try:
             indices = next(self.iterator)
         except StopIteration:
-            self.iterator = self._create_iterator()
+            # Refill the iterator when it's exhausted
+            self.iterator = iter(self.batch_sampler)
             indices = next(self.iterator)
-        return [self.items[i] for i in indices] + self.base_batch
+        
+        sampled_items = [self.items[i] for i in indices]
+        return sampled_items + self.base_batch
 
 class BalancedTaskSampler:
-    """Samples balanced batches of tasks from a benchmark (for ML10)."""
-    def __init__(self, benchmark, batch_size: int, test: bool = False):
+    """
+    Samples a batch of tasks from a metaworld benchmark, ensuring that the
+    number of tasks from each environment type is as balanced as possible.
+    """
+    def __init__(self, benchmark, batch_size: int, test: bool =False):
+        self.batch_size = batch_size
+        
+        # 1. Group tasks by their environment name
         classes = benchmark.test_classes if test else benchmark.train_classes
         tasks = benchmark.test_tasks if test else benchmark.train_tasks
         env_names = list(classes.keys())
         tasks_by_env = defaultdict(list)
         for task in tasks:
             tasks_by_env[task.env_name].append(task)
-        self.env_type_sampler = _InfiniteSampler(env_names, batch_size)
-        self.task_samplers = {name: _InfiniteSampler(tasks, 1) for name, tasks in tasks_by_env.items()}
+            
+        # 2. Create a sampler for environment types (e.g., 'reach-v2', 'push-v2')
+        self.env_type_sampler = _InfiniteSampler(env_names, self.batch_size)
+        
+        # 3. Create a sampler for each environment's specific tasks (e.g., different goals)
+        self.task_samplers = {
+            name: _InfiniteSampler(tasks, 1) for name, tasks in tasks_by_env.items()
+        }
 
     def __iter__(self) -> Iterator:
         return self
-
+    
     def __next__(self) -> List[Any]:
+        """Samples one balanced batch of tasks."""
+        # Stage 1: Sample a balanced batch of environment names
         sampled_env_types = next(self.env_type_sampler)
-        random.shuffle(sampled_env_types)
-        return [next(self.task_samplers[name])[0] for name in sampled_env_types]
-
-class TaskSampler:
-    """Samples random batches of tasks from a list (for ML1)."""
-    def __init__(self, tasks: List[Any], batch_size: int):
-        self.tasks = tasks
-        self.batch_size = batch_size
-
-    def __iter__(self) -> Iterator:
-        return self
-
-    def __next__(self) -> List[Any]:
-        return [random.choice(self.tasks) for _ in range(self.batch_size)]
-
-class MetaWorldBenchmarkEnv(l2l.gym.MetaEnv):
-    """Unified wrapper for Meta-World benchmarks (ML1 and ML10)."""
-    def __init__(self, benchmark, seed=None, test=False):
-        self.benchmark = benchmark
+        random.shuffle(sampled_env_types) # Shuffle to mix base and sampled items
+        
+        # Stage 2: For each env name, sample one specific task
+        # The internal sampler yields a list of size 1, so we take the first element.
+        batch = [next(self.task_samplers[name])[0] for name in sampled_env_types]
+        return batch
+    
+class MetaWorldML1(l2l.gym.MetaEnv):
+    """
+    Wrapper for the Meta-World ML1 benchmark to make it compatible
+    with the learn2learn MetaEnv interface.
+    """
+    def __init__(self, env_name: str, seed=None, test=False, render_mode="rgb_array"):
         self.test = test
-        self.tasks = benchmark.test_tasks if test else benchmark.train_tasks
-        self.classes = benchmark.test_classes if test else benchmark.train_classes
+        self.ml1 = metaworld.ML1(env_name, seed=seed)
+        self.render_mode = render_mode
+        
+        # Select the correct task list
+        tasks = self.ml1.test_tasks if test else self.ml1.train_tasks
+        self.tasks = tasks
+        
         self._active_env = None
-        self.set_task(self.tasks[0]) # Initialize with the first task
-
+        # Set an initial task to define observation and action spaces
+        self.set_task(tasks[0])
+       
     @property
     def observation_space(self):
         return self._active_env.observation_space
@@ -134,7 +157,9 @@ class MetaWorldBenchmarkEnv(l2l.gym.MetaEnv):
         return self._active_env.action_space
 
     def set_task(self, task):
-        env_cls = self.classes[task.env_name]
+        """Sets the active environment based on the task description."""
+        env_name = task.env_name
+        env_cls = self.ml1.test_classes[env_name] if self.test else self.ml1.train_classes[env_name]
         self._active_env = env_cls()
         self._active_env.set_task(task)
         self._active_env.reset()
@@ -144,24 +169,95 @@ class MetaWorldBenchmarkEnv(l2l.gym.MetaEnv):
         obs, reward, terminated, truncated, info = self._active_env.step(action)
         done = terminated or truncated
         return obs, reward, done, info
-
+    
     def reset(self, **kwargs):
         obs, info = self._active_env.reset(**kwargs)
         return obs
 
-    def render(self, **kwargs):
+    def render(self, mode="rgb_array", **kwargs):
+        self._active_env.render_mode = mode
         return self._active_env.render(**kwargs)
 
-# --- Meta-SGD Trainer Class ---
+
+
+class MetaWorldML10(l2l.gym.MetaEnv):
+    """
+    Wrapper for the Meta-World ML10 benchmark to make it compatible
+    with the learn2learn MetaEnv interface.
+    """
+    def __init__(self, seed=None, test=False, render_mode="rgb_array"):
+        self.test = test
+        self.render_mode = render_mode
+        self.ml10 = metaworld.ML10(seed=seed)
+        self.train_tasks = self.ml10.train_tasks
+        self._active_env = None
+        # Set an initial task to define spaces
+        task = self.ml10.test_tasks if test else self.ml10.train_tasks
+        self.set_task(task[0])
+       
+    @property
+    def observation_space(self):
+        return self._active_env.observation_space
+
+    @property
+    def action_space(self):
+        return self._active_env.action_space
+
+    def set_task(self, task):
+        """Sets the active environment based on the task description."""
+        env_name = task.env_name
+        classes = self.ml10.test_classes if self.test else self.ml10.train_classes
+        env_cls = classes[env_name]
+        self._active_env = env_cls()
+        self._active_env.set_task(task)
+        self._active_env.reset() 
+        return True
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self._active_env.step(action)
+        done = terminated or truncated
+        return obs, reward, done, info
+    
+    def reset(self, **kwargs):
+        obs, info = self._active_env.reset(**kwargs)
+        return obs
+
+    def render(self, mode="rgb_array", **kwargs):
+        self._active_env.render_mode = mode
+        return self._active_env.render()
+
+env_name = "door-close-v3"
+
+def make_env(bench="ML1", seed=42, test=False, render_mode=None):
+    def fn():
+        if bench=="ML1":
+            env = MetaWorldML1(env_name, seed=seed, test=test, render_mode=render_mode)
+        else:
+            env = MetaWorldML10(seed=seed, test=test, render_mode=render_mode)
+        env = ch.envs.ActionSpaceScaler(env)
+        return env
+    return fn
 
 class MetaSGDTrainer:
     """
-    A trainer class for the Meta-SGD algorithm with Advantage Actor-Critic (A2C) and Meta-World.
+    A trainer class for the Meta-SGD algorithm with Advantage Actor-Critic (A2C).
+
+    Args:
+        env_name (str): The name of the Gym environment to use.
+        fast_lr_init (float): The initial value for the per-parameter fast adaptation learning rates.
+        meta_lr (float): Learning rate for the outer loop meta-optimizer (Adam).
+        adapt_steps (int): Number of adaptation steps in the inner loop.
+        meta_bsz (int): Number of tasks to sample per meta-iteration.
+        adapt_bsz (int): Number of episodes to sample per adaptation step.
+        tau (float): GAE discount factor.
+        gamma (float): TD discount factor.
+        seed (int): Random seed for reproducibility.
+        num_workers (int): Number of parallel workers for environment sampling.
+        cuda (bool): Whether to use GPU (if available).
     """
     def __init__(
         self,
-        benchmark_name: str, # 'ml1' or 'ml10'
-        env_name: str = None,  # Required for ML1
+        bench: str = 'ML10',
         fast_lr_init: float = 0.1,
         meta_lr: float = 0.001,
         adapt_steps: int = 1,
@@ -170,17 +266,10 @@ class MetaSGDTrainer:
         tau: float = 1.00,
         gamma: float = 0.99,
         seed: int = 42,
-        num_workers: int = 8,
+        num_workers: int = 10,
         cuda: bool = True,
     ):
-        # Input Validation
-        assert benchmark_name in ['ml1', 'ml10'], "Benchmark must be 'ml1' or 'ml10'."
-        if benchmark_name == 'ml1' and env_name is None:
-            raise ValueError("env_name must be specified for ML1 benchmark.")
-        
-        self.benchmark_name = benchmark_name
-        self.env_name = env_name
-        self.fast_lr_init = fast_lr_init
+        self.bench = bench
         self.meta_lr = meta_lr
         self.adapt_steps = adapt_steps
         self.meta_bsz = meta_bsz
@@ -200,36 +289,29 @@ class MetaSGDTrainer:
             torch.cuda.manual_seed(self.seed)
             self.device = torch.device('cuda')
 
-        # Create Benchmark and Task Sampler
-        if self.benchmark_name == 'ml1':
-            self.benchmark = metaworld.ML1(self.env_name, seed=self.seed)
-            self.train_task_sampler = TaskSampler(self.benchmark.train_tasks, batch_size=self.meta_bsz)
-        elif self.benchmark_name == 'ml10':
-            self.benchmark = metaworld.ML10(seed=self.seed)
-            self.train_task_sampler = BalancedTaskSampler(self.benchmark, batch_size=self.meta_bsz)
-        
-        # Create a dummy env to get observation and action shapes
-        dummy_env = MetaWorldBenchmarkEnv(self.benchmark, seed=self.seed)
+        self.benchmark = metaworld.ML10(seed=seed) if bench=="ML10" else metaworld.ML1(env_name, seed=seed)
+        self.task_sampler = BalancedTaskSampler(self.benchmark, batch_size=meta_bsz)
+
+        dummy_task = next(self.task_sampler)[0]
+        dummy_env = self.benchmark.train_classes[dummy_task.env_name]()
+        dummy_env.set_task(dummy_task)
         state_size = dummy_env.observation_space.shape[0]
         action_size = dummy_env.action_space.shape[0]
 
-        # Create AsyncVectorEnv
-        def make_env():
-            env = MetaWorldBenchmarkEnv(self.benchmark, seed=self.seed)
-            env = ch.envs.ActionSpaceScaler(env)
-            return env
 
-        self.env = l2l.gym.AsyncVectorEnv([make_env for _ in range(self.num_workers)])
+        self.env = l2l.gym.AsyncVectorEnv([make_env(bench=bench, seed=seed) for _ in range(self.num_workers)])
         self.env.seed(self.seed)
         self.env = ch.envs.Torch(self.env)
         
-        # Initialize Policy and Baseline
         policy = DiagNormalPolicy(state_size, action_size, device=self.device)
-        self.meta_learner = l2l.algorithms.MetaSGD(policy, lr=self.fast_lr_init, first_order=False)
-        self.baseline = LinearValue(state_size, action_size).to(self.device)
+        # Key difference: Wrap the model with MetaSGD
+        self.meta_learner = l2l.algorithms.MetaSGD(policy, lr=fast_lr_init, first_order=False)
+        self.baseline = LinearValue(state_size, action_size)
         
-        self.meta_learner.to(self.device)
-        self.baseline.to(self.device)
+        self.meta_learner = self.meta_learner.to(self.device)
+        self.baseline = self.baseline.to(self.device)
+
+        # Key difference: Use a standard optimizer for the meta-parameters
         self.meta_optimizer = optim.Adam(self.meta_learner.parameters(), lr=self.meta_lr)
 
     def train(self, num_iterations: int = 300) -> Iterator[Dict[str, Any]]:
@@ -237,49 +319,136 @@ class MetaSGDTrainer:
         Starts the training process. Yields metrics at each iteration.
         """
         for iteration in range(num_iterations):
-            self.meta_optimizer.zero_grad()
             iteration_reward = 0.0
             iteration_meta_loss = 0.0
 
-            with tqdm(total=self.meta_bsz, desc=f'Iteration {iteration+1}/{num_iterations}', leave=False) as pbar:
-                for task_i, task_config in enumerate(next(self.train_task_sampler)):
-                    # 1. Create a clone of the meta-learner
-                    learner = self.meta_learner.clone()
+            tasks = next(self.task_sampler)
+            for task_config in tqdm(tasks, leave=False, desc='Data Collection'):
+                learner = self.meta_learner.clone()
+                learner = learner.to(self.device)
+                self.env.set_task(task_config)
+                self.env.reset()
+                task = ch.envs.Runner(self.env)
                     
-                    # 2. Initialize and set task
-                    self.env.set_task(task_config)
-                    self.env.reset()
-                    task = ch.envs.Runner(self.env)
+                for step in range(self.adapt_steps):
+                    train_episodes = task.run(learner, episodes=self.adapt_bsz)
+                    train_episodes = train_episodes.to(self.device)
+                    inner_loss = maml_a2c_loss(train_episodes, learner, self.baseline, self.gamma, self.tau)
+                    learner.adapt(inner_loss)
 
-                    # 3. Inner loop adaptation
-                    for step in range(self.adapt_steps):
-                        train_episodes = task.run(learner, episodes=self.adapt_bsz)
-                        train_episodes = train_episodes.to(self.device)
-                        inner_loss = a2c_loss(train_episodes, learner, self.baseline, self.gamma, self.tau)
-                        learner.adapt(inner_loss)
-
-                    # 4. Compute meta-loss on validation episodes
-                    valid_episodes = task.run(learner, episodes=self.adapt_bsz)
-                    valid_episodes = valid_episodes.to(self.device)
-                    meta_loss = a2c_loss(valid_episodes, learner, self.baseline, self.gamma, self.tau)
+                valid_episodes = task.run(learner, episodes=self.adapt_bsz)
+                valid_episodes = valid_episodes.to(self.device)
+                meta_loss = maml_a2c_loss(valid_episodes, learner, self.baseline, self.gamma, self.tau)
                     
-                    iteration_reward += valid_episodes.reward().sum().item() / self.adapt_bsz
-                    iteration_meta_loss += meta_loss
-                    pbar.update(1)
+                iteration_meta_loss += meta_loss
+                iteration_reward += valid_episodes.reward().sum().item() / self.adapt_bsz
 
             # 5. Meta-optimization step
             adaptation_reward = iteration_reward / self.meta_bsz
             meta_loss = iteration_meta_loss / self.meta_bsz
             
             # Backpropagate the meta-loss and update the meta-learner
+            self.meta_optimizer.zero_grad()
             meta_loss.backward()
             self.meta_optimizer.step()
+
+            if iteration % 30 == 0:
+                self.evaluate(iteration)
 
             yield {
                 'iteration': iteration,
                 'adaptation_reward': adaptation_reward,
                 'meta_loss': meta_loss.item(),
             }
+
+    def evaluate(self, iteration: int):
+        """
+        Evaluates the meta-learner on a set of test tasks.
+        """
+        print(f"\n--- Evaluating at Iteration {iteration} ---")
+        adapt_steps = 3
+        adapt_bsz = 10
+        n_eval_tasks = 10
+        total_reward = 0.0
+        
+        env = make_env(bench=self.bench, seed=self.seed, test=True)()
+        env = ch.envs.Torch(env)
+        task_sampler = BalancedTaskSampler(self.benchmark, batch_size=n_eval_tasks, test=True)
+        results_by_class = defaultdict(list)
+        video_frames = {}
+
+        for task in tqdm(next(task_sampler), leave=False, desc="Evaluation"):
+            learner = self.meta_learner.clone()
+            learner = learner.to(self.device)
+            env.set_task(task)
+            env.reset()
+            task_runner = ch.envs.Runner(env)
+            frames = []
+
+            # Adapt the policy
+            for step in range(adapt_steps):
+                adapt_episodes = task_runner.run(learner, episodes=adapt_bsz)
+                adapt_episodes = adapt_episodes.to(self.device)
+                inner_loss = maml_a2c_loss(adapt_episodes, learner, self.baseline, self.gamma, self.tau)
+                learner.adapt(inner_loss)
+
+            # Collect video frames
+            with torch.no_grad():
+                obs = env.reset()
+                done = False
+                while not done:
+                    frame = env.unwrapped.render()
+                    frames.append(frame)
+                    action = learner(obs.to(self.device))
+                    obs, _, done, _ = env.step(action)
+            video_frames[task.env_name] = frames
+
+            # Calculate evaluation reward
+            eval_episodes = task_runner.run(learner, episodes=adapt_bsz)
+            task_reward = eval_episodes.reward().sum().item() / adapt_bsz
+            total_reward += task_reward
+
+            task_success = eval_episodes.success().cpu().numpy().flatten()
+            task_done = eval_episodes.done().cpu().numpy().flatten()
+            num_episodes, successful_episodes, start_idx = 0, 0, 0
+            end_indices = np.where(task_done == 1)[0]
+            if len(end_indices) > 0:
+                num_episodes = len(end_indices)
+                for end_idx in end_indices:
+                    if np.any(task_success[start_idx:end_idx + 1] > 0):
+                        successful_episodes += 1
+                    start_idx = end_idx + 1
+                task_success_rate = successful_episodes / num_episodes
+            else:
+                task_success_rate = 0.0
+            print("Success", task_success_rate)
+            results_by_class[f"{task.env_name}_success_rate"].append(task_success_rate)
+
+        # Save videos locally
+        video_dir = f"videos/metasgd_{self.bench}_seed_{self.seed}"
+        os.makedirs(video_dir, exist_ok=True)
+        print(f"\nSaving evaluation videos to {video_dir}...")
+        for task_name, frames in video_frames.items():
+            if frames:
+                try:
+                    clip = ImageSequenceClip(frames, fps=15)
+                    video_path = os.path.join(video_dir, f"task_{task_name}_iter_{iteration}.mp4")
+                    clip.write_videofile(video_path, codec="libx264", logger=None)
+                    print(f"  -> Saved {video_path}")
+                except Exception as e:
+                    print(f"  -> Could not save video for task {task_name}. Error: {e}")
+
+        # Log metrics
+        avg_reward = total_reward / n_eval_tasks
+        print(f"Average evaluation reward: {avg_reward:.4f}\n")
+        wandb.log({'evaluation_reward': avg_reward, 'iteration': iteration})
+        num_train_tasks = 5
+        for i in range(adapt_bsz//num_train_tasks):
+            res = {}
+            for env_name, successes in results_by_class.items():
+                res[env_name] = successes[i]
+            wandb.log(res)
+        return avg_reward
 
     def save_model(self, path: str):
         """Saves the meta-learner's state dictionary to a file."""
@@ -305,259 +474,39 @@ class MetaSGDTrainer:
 
         print(f"Checkpoint loaded successfully from {path}")
 
-def fast_adapt_meta_sgd(clone, episodes, baseline, gamma, tau, first_order, device):
-    """
-    Performs a single adaptation step using the Meta-SGD update rule.
-    
-    It uses the learning rates stored within the `clone` model.
-    """
-    second_order = not first_order
-    
-    # Calculate loss on the adaptation data
-    loss = a2c_loss(episodes, clone, baseline, gamma, tau, device)
-
-    # Get gradients of the loss with respect to the policy's parameters
-    # Assumes your Meta-SGD model stores weights in `clone.parameters()`
-    params = list(clone.parameters())
-    gradients = torch.autograd.grad(loss,
-                                    params,
-                                    retain_graph=second_order,
-                                    create_graph=second_order)
-
-    # Perform the Meta-SGD update: new_param = param - lr * grad
-    # Assumes your model stores the learned learning rates in `clone.adapt_lrs`
-    if not hasattr(clone, 'adapt_lrs'):
-        raise AttributeError("The provided policy model does not have 'adapt_lrs'. "
-                             "Ensure your Meta-SGD model defines them, e.g., as nn.ParameterList.")
-
-    updated_params = []
-    for param, grad, lr in zip(params, gradients, clone.adapt_lrs):
-        updated_param = param - lr * grad
-        updated_params.append(updated_param)
-
-    # Create a new policy instance with the updated parameters
-    # This requires your model to have a .clone() method that accepts new parameters.
-    # If not, you might need to use a library like `higher` or manually update.
-    return clone.clone(new_params=updated_params)
-
-def evaluate_meta_sgd(benchmark, policy, baseline, gamma, tau, n_workers, seed, cuda):
-    """
-    Evaluates a Meta-SGD policy on a benchmark.
-    
-    The learning rates for adaptation are part of the 'policy' model itself.
-    """
-    device = torch.device('cuda' if cuda else 'cpu')
-
-    # Parameters
-    adapt_steps = 3
-    adapt_bsz = 10  # Number of episodes to collect per adaptation step
-    n_eval_tasks = 10
-
-    tasks_reward = 0
-    policy.to(device)
-    baseline.to(device)
-
-    if args.benchmark == 'ml1':
-        test_benchmark = metaworld.ML1(args.env_name, seed=args.seed)
-    else: # args.benchmark == 'ml10'
-        test_benchmark = metaworld.ML10(seed=args.seed)
-    test_env = MetaWorldBenchmarkEnv(test_benchmark, seed=args.seed, test=True)
-    test_env = ch.envs.ActionSpaceScaler(test_env)
-
-    n_eval_tasks = 10 # 10 task types
-    if args.benchmark == 'ml10':
-        task_sampler = BalancedTaskSampler(test_benchmark, batch_size=n_eval_tasks, test=True)
-    else:
-        task_sampler = TaskSampler(test_benchmark.test_tasks, batch_size=n_eval_tasks)
-
-    env = ch.envs.Torch(test_env)
-    task_sampler = BalancedTaskSampler(benchmark, batch_size=n_eval_tasks, test=True)
-    
-    results_by_class = defaultdict(list)
-    
-    # Iterate over a batch of test tasks
-    for i, task in enumerate(next(task_sampler)):
-        clone = deepcopy(policy)
-        env.set_task(task)
-        env.reset()
-        task_run = ch.envs.Runner(env)
-
-        # Adapt the policy for a few steps
-        for step in range(adapt_steps):
-            adapt_episodes = task_run.run(clone, episodes=adapt_bsz)
-            if cuda:
-                adapt_episodes = adapt_episodes.to(device, non_blocking=True)
-            
-            # Perform a Meta-SGD update step
-            clone = fast_adapt_meta_sgd(clone,
-                                        adapt_episodes,
-                                        baseline,
-                                        gamma,
-                                        tau,
-                                        first_order=True,
-                                        device=device)
-
-        # Evaluate the final adapted policy
-        eval_episodes = task_run.run(clone, episodes=adapt_bsz)
-
-        # Calculate and log metrics
-        task_reward = eval_episodes.reward().sum().item() / adapt_bsz
-        
-        # Success rate calculation (assuming 'success' is in info dict)
-        task_success = eval_episodes.success().cpu().numpy().flatten()
-        task_done = eval_episodes.done().cpu().numpy().flatten()
-        num_episodes, successful_episodes, start_idx = 0, 0, 0
-        end_indices = np.where(task_done == 1)[0]
-        
-        if len(end_indices) > 0:
-            num_episodes = len(end_indices)
-            for end_idx in end_indices:
-                if np.any(task_success[start_idx:end_idx + 1] > 0):
-                    successful_episodes += 1
-                start_idx = end_idx + 1
-            task_success_rate = successful_episodes / num_episodes
-        else:
-            task_success_rate = 0.0
-            
-        print(f"Task {i+1}/{n_eval_tasks} | Success Rate: {task_success_rate:.2f} | Reward: {task_reward:.2f}")
-        results_by_class[f"{task.env_name}_success_rate"].append(task_success_rate)
-        tasks_reward += task_reward
-
-    final_eval_reward = tasks_reward / n_eval_tasks
-    print(f"\nAverage reward over {n_eval_tasks} test tasks: {final_eval_reward:.3f}")
-
-    # Log results to wandb if available
-    if wandb.run:
-        num_train_tasks = 5 # Example value, adjust as needed
-        for i in range(min(len(next(iter(results_by_class.values()))), adapt_bsz // num_train_tasks)):
-            res = {}
-            for env_name, successes in results_by_class.items():
-                res[env_name] = successes[i]
-            wandb.log(res)
-            
-    return final_eval_reward
-
-def evaluate(args, trainer):
-    """Evaluates the Meta-SGD model on test tasks."""
-    print("\n--- Evaluating on Test Tasks ---")
-    device = torch.device('cuda' if args.cuda and torch.cuda.is_available() else 'cpu')
-    trainer.baseline.to(device)
-    if args.benchmark == 'ml1':
-        test_benchmark = metaworld.ML1(args.env_name, seed=args.seed)
-    else: # args.benchmark == 'ml10'
-        test_benchmark = metaworld.ML10(seed=args.seed)
-    test_env = MetaWorldBenchmarkEnv(test_benchmark, seed=args.seed, test=True)
-    test_env = ch.envs.ActionSpaceScaler(test_env)
-
-    n_eval_tasks = 10 # 10 task types
-    if args.benchmark == 'ml10':
-        test_task_sampler = BalancedTaskSampler(test_benchmark, batch_size=n_eval_tasks, test=True)
-    else:
-        test_task_sampler = TaskSampler(test_benchmark.test_tasks, batch_size=n_eval_tasks)
-
-    env = ch.envs.Torch(test_env)
-    
-    results_by_class = defaultdict(list)
-    total_reward = 0
-
-    with torch.no_grad():
-        for task in tqdm(next(test_task_sampler), desc="Evaluation"):
-            clone = deepcopy(trainer.meta_learner)
-            clone.to(device)
-            env.set_task(task)
-            env.reset()
-            task_runner = ch.envs.Runner(env)
-
-            # Adapt
-            for _ in range(args.adapt_steps):
-                adapt_episodes = task_runner.run(clone, episodes=args.adapt_bsz)
-                adapt_episodes.to(device)
-                inner_loss = a2c_loss(adapt_episodes, clone, trainer.baseline, args.gamma, args.tau)
-                clone.adapt(inner_loss)
-
-            eval_episodes = task_runner.run(clone, episodes=args.adapt_bsz)
-            successes = [info['success'] for info in eval_episodes.info()]
-            success_rate = np.mean(successes)
-
-            results_by_class[f"{task.env_name}_success_rate"].append(success_rate)
-            total_reward += eval_episodes.reward().sum().item() / args.adapt_bsz
-
-    avg_eval_reward = total_reward / n_eval_tasks
-    log_dict = {'test_reward': avg_eval_reward}
-    
-    if args.benchmark == 'ml10':
-        for env_name, successes in results_by_class.items():
-            log_dict[env_name] = np.mean(successes)
-    
-    avg_success_rate = np.mean([s for succs in results_by_class.values() for s in succs])
-    log_dict['test_success_rate_avg'] = avg_success_rate
-
-    print(f"Average Test Reward: {avg_eval_reward:.4f}")
-    print(f"Average Test Success Rate: {avg_success_rate:.4f}")
-    wandb.log(log_dict)
-
-def main(args):
-    # Initialize Trainer
-    trainer = MetaSGDTrainer(
-        benchmark_name=args.benchmark,
-        env_name=args.env_name,
-        fast_lr_init = args.fast_lr_init,
-        meta_lr=args.meta_lr,
-        adapt_steps=args.adapt_steps,
-        meta_bsz=args.meta_bsz,
-        adapt_bsz=args.adapt_bsz,
-        tau=args.tau,
-        gamma=args.gamma,
-        seed=args.seed,
-        num_workers=args.num_workers,
-        cuda=args.cuda,
-    )
-
-    # Initialize W&B
-    wandb.init(
-        project=f"l2l-metaworld-{args.benchmark}-{args.env_name or 'all'}-metasgd",
-        config=vars(args)
-    )
-
-    # Load Checkpoint if it exists
-    trainer.load_model("model/meta_sgd.pth")
-
-    # Train and Evaluate
-    for i, metrics in enumerate(trainer.train(num_iterations=args.num_iterations)):
-        wandb.log(metrics)
-        print(
-            f"Iteration {metrics['iteration'] + 1}: "
-            f"Reward = {metrics['adaptation_reward']:.4f}, "
-            f"Meta Loss = {metrics['meta_loss']:.4f}"
-        )
-        
-        if i % 25 == 0:
-            evaluate(args, trainer) # Pass trainer instance
-
-    # Save the final model
-    save_path = f"model/meta_sgd_{args.benchmark}_{args.env_name or 'all'}.pth"
-    trainer.save_model(save_path)
-
-    wandb.finish()
-
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="Meta-SGD on Meta-World")
-    parser.add_argument('--benchmark', type=str, choices=['ml1', 'ml10'], required=True, help="Benchmark to use.")
-    parser.add_argument('--env_name', type=str, default=None, help="Environment name for ML1 (e.g., 'reach-v2').")
-    parser.add_argument('--fast_lr_init', type=float, default=0.1, help="Initial fast adaptation learning rate")
-    # Hyperparameters
-    parser.add_argument('--num_iterations', type=int, default=500, help="Number of meta-iterations.")
-    parser.add_argument('--meta_lr', type=float, default=0.001, help="Outer loop learning rate (Adam).")
-    parser.add_argument('--adapt_steps', type=int, default=1, help="Number of adaptation steps in the inner loop.")
-    parser.add_argument('--meta_bsz', type=int, default=20, help="Meta-batch size (number of tasks).")
-    parser.add_argument('--adapt_bsz', type=int, default=20, help="Adaptation batch size (episodes per task).")
-    parser.add_argument('--gamma', type=float, default=0.99, help="Discount factor.")
-    parser.add_argument('--tau', type=float, default=1.00, help="GAE parameter.")
-    
-    # General settings
-    parser.add_argument('--seed', type=int, default=42, help="Random seed.")
-    parser.add_argument('--num_workers', type=int, default=8, help="Number of parallel workers.")
-    parser.add_argument('--cuda', type=int, default=1, help="Whether to use CUDA (1 for True, 0 for False).")
-    
-    args = parser.parse_args()
-    main(args)
+    import wandb
+    # This block allows running the script directly for a single experiment
+    try:
+        os.environ['CUDA_VISIBLE_DEVICES'] = str(5)
+        seed = 1
+        envname = 'ML1'
+        trainer = MetaSGDTrainer(
+            bench=envname,
+            fast_lr_init = 0.08139,
+            meta_lr = 0.004335,
+            adapt_steps = 1,
+            meta_bsz = 10,
+            adapt_bsz = 20,
+            tau = 1.00,
+            gamma = 0.962,
+            seed = seed,
+            num_workers = 10,
+            cuda = True,
+        )
+        wandb.init(project=f"meta_sgd_{envname}_", name=f"seed_{seed}")
+        for metrics in trainer.train(num_iterations=500):
+            wandb.log(metrics)
+            print(
+                f"Iteration {metrics['iteration'] + 1}: "
+                f"Reward = {metrics['adaptation_reward']:.4f}, "
+                f"Meta Loss = {metrics['meta_loss']:.4f}"
+            )
+        save_path = f"model/meta_sgd_{envname}_{seed}.pth"
+        trainer.save_model(save_path)
+    except gym.error.DependencyNotInstalled:
+        print("="*60)
+        print("This example requires Mujoco. Please see the MAML-TRPO trainer for installation notes.")
+        print("="*60)
+    except Exception as e:
+        print(f"An error occurred: {e}")

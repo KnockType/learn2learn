@@ -29,7 +29,7 @@ from collections import defaultdict
 import learn2learn as l2l
 from examples.rl.policies import DiagNormalPolicy # Assuming policies.py is in examples/rl/
 
-import moviepy
+from moviepy import ImageSequenceClip
 
     
 os.environ['MUJOCO_GL'] = 'egl'
@@ -114,7 +114,7 @@ class MetaWorldML1(l2l.gym.MetaEnv):
     Wrapper for the Meta-World ML1 benchmark to make it compatible
     with the learn2learn MetaEnv interface.
     """
-    def __init__(self, env_name: str, seed=None, test=False, render_mode=None):
+    def __init__(self, env_name: str, seed=None, test=False, render_mode="rgb_array"):
         self.test = test
         self.ml1 = metaworld.ML1(env_name, seed=seed)
         self.render_mode = render_mode
@@ -154,6 +154,7 @@ class MetaWorldML1(l2l.gym.MetaEnv):
         return obs
 
     def render(self, mode="rgb_array", **kwargs):
+        self._active_env.render_mode = mode
         return self._active_env.render(**kwargs)
 
 
@@ -289,12 +290,12 @@ def meta_surrogate_loss(iteration_replays, iteration_policies, policy, baseline,
 
 env_name = "door-close-v3"
 
-def make_env(bench="ML1", test=False, render_mode=None):
+def make_env(bench="ML1", seed=42, test=False, render_mode=None):
     def fn():
         if bench=="ML1":
-            env = MetaWorldML1(env_name, seed=4, test=test, render_mode=render_mode)
+            env = MetaWorldML1(env_name, seed=seed, test=test, render_mode=render_mode)
         else:
-            env = MetaWorldML10(seed=4, test=test, render_mode=render_mode)
+            env = MetaWorldML10(seed=seed, test=test, render_mode=render_mode)
         env = ch.envs.ActionSpaceScaler(env)
         return env
     return fn
@@ -324,7 +325,7 @@ def main(
 
     # Initialize W&B
     wandb.init(
-        project=f"maml-trpo_ML10",
+        project=f"maml-trpo_ML1",
         name=f"seed_{seed}",
         config={
             "adapt_lr": adapt_lr,
@@ -348,7 +349,7 @@ def main(
     state_size = dummy_env.observation_space.shape[0]
     action_size = dummy_env.action_space.shape[0]
 
-    env = l2l.gym.AsyncVectorEnv([make_env(bench=bench) for _ in range(num_workers)])
+    env = l2l.gym.AsyncVectorEnv([make_env(bench=bench, seed=seed) for _ in range(num_workers)])
     env.seed(seed)
     env = ch.envs.Torch(env)
     
@@ -436,10 +437,10 @@ def main(
                 break
 
         if iteration % 30 == 0:
-            evaluate(benchmark, policy, baseline, adapt_lr, gamma, tau, num_workers, seed, cuda, bench)
+            evaluate(benchmark, policy, baseline, adapt_lr, gamma, tau, num_workers, seed, cuda, bench, iteration)
 
 
-    path = "model/maml_{bench}_seed_{seed}.pth"
+    path = f"model/maml_{bench}_seed_{seed}.pth"
     os.makedirs(os.path.dirname(path), exist_ok=True)
     checkpoint = {
         'policy_state_dict': policy.state_dict(),
@@ -449,7 +450,7 @@ def main(
     torch.save(checkpoint, path)
     print(f"Checkpoint saved successfully to {path}")
 
-def evaluate(benchmark, policy, baseline, adapt_lr, gamma, tau, n_workers, seed, cuda, bench):
+def evaluate(benchmark, policy, baseline, adapt_lr, gamma, tau, n_workers, seed, cuda, bench, iteration):
     device_name = 'cpu'
     if cuda:
         device_name = 'cuda'
@@ -462,7 +463,7 @@ def evaluate(benchmark, policy, baseline, adapt_lr, gamma, tau, n_workers, seed,
 
     tasks_reward = 0
 
-    env = make_env(bench=bench, test=True)()
+    env = make_env(bench=bench, test=True, seed=seed)()
     env = ch.envs.Torch(env)
     task_sampler = BalancedTaskSampler(benchmark, batch_size=n_eval_tasks, test=True)
     results_by_class = defaultdict(list)
@@ -493,13 +494,13 @@ def evaluate(benchmark, policy, baseline, adapt_lr, gamma, tau, n_workers, seed,
             clone = fast_adapt_a2c(clone, adapt_episodes, adapt_lr, baseline, gamma, tau, first_order=True)
 
         
-
+        
         with torch.no_grad():
             obs = env.reset()
             done = False
             while not done:
                 curr_frame = env.unwrapped.render()
-                frames.append(np.transpose(curr_frame, (2, 0, 1)))
+                frames.append(curr_frame)
                 action = clone(obs.to(device))
                 obs, reward, done, info = env.step(action)
         video_frames[task.env_name] = frames
@@ -532,11 +533,28 @@ def evaluate(benchmark, policy, baseline, adapt_lr, gamma, tau, n_workers, seed,
 
 
     # Log all collected videos to W&B
+    '''
     for task_name, frames in video_frames.items():
         if frames:
             stacked_frames = np.stack(frames)
             wandb.log({f"seed_{seed}_task_{task_name}": wandb.Video(stacked_frames, fps=15)})
+    '''
 
+    video_dir = f"videos/maml_{bench}_seed_{seed}"
+    os.makedirs(video_dir, exist_ok=True)
+    print(f"\nSaving evaluation videos to {video_dir}...")
+
+    # Save all collected videos locally
+    for task_name, frames in video_frames.items():
+        if frames:
+            try:
+                clip = ImageSequenceClip(frames, fps=15)
+                video_path = os.path.join(video_dir, f"task_{task_name}_iter_{iteration}.mp4")
+                # Use logger=None to suppress verbose moviepy output
+                clip.write_videofile(video_path, codec="libx264", logger=None)
+                print(f"  -> Saved {video_path}")
+            except Exception as e:
+                print(f"  -> Could not save video for task {task_name}. Error: {e}")
 
     final_eval_reward = tasks_reward / n_eval_tasks
     
@@ -551,9 +569,10 @@ def evaluate(benchmark, policy, baseline, adapt_lr, gamma, tau, n_workers, seed,
 
 
 if __name__ == '__main__':
-    os.environ['CUDA_VISIBLE_DEVICES'] = str(4)
+    os.environ['CUDA_VISIBLE_DEVICES'] = str(1)
     seed = 808
     main(
+        bench="ML1",
         seed=seed,
         num_workers=10,
         cuda=True,
