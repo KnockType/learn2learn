@@ -2,7 +2,7 @@
 # Defines the hyperparameter search space for the MAML-TRPO algorithm.
 # This file will be loaded by our Python script to create the sweep.
 
-name: FO_MAML_TRPO_HALFCHEETAHFORWARDBACKWARD_SWEEP
+name: MAML_TRPO_HALFCHEETAHFORWARDBACKWARD_SWEEP
 method: bayes
 metric:
   name: adaptation_reward
@@ -10,12 +10,12 @@ metric:
 parameters:
   adapt_lr:
     distribution: log_uniform_values
-    min: 0.001
-    max: 0.01
+    min: 0.01
+    max: 0.1
   meta_lr:
     distribution: log_uniform_values
     min: 0.8
-    max: 2.0
+    max: 1.2
   adapt_steps:
     values: [1, 2, 3]
   gamma:

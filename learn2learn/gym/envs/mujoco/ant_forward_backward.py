@@ -101,17 +101,16 @@ class AntForwardBackwardEnv(MetaEnv, MujocoEnv, gym.utils.EzPickle):
         return self._get_obs()
 
     def render(self, mode='human'):
+        width, height = 500, 500
         if mode == 'rgb_array':
-            self._get_viewer(mode).render()
+            self._get_viewer(mode).render(width, height)
             # window size used for old mujoco-py:
-            width, height = 500, 500
             data = self._get_viewer(mode).read_pixels(width,
                                                       height,
                                                       depth=False)
             return data
         elif mode == 'human':
-            self._get_viewer(mode).render()
-
+            self._get_viewer(mode).render(width, height)
 
 if __name__ == '__main__':
     env = AntForwardBackwardEnv()

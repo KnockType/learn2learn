@@ -176,6 +176,19 @@ class RampPushEnv(l2l.gym.MetaEnv, MujocoEnv, utils.EzPickle):
     def viewer_setup(self):
         self.viewer.cam.distance = 6.0
 
+    def render(self, mode='human'):
+        width, height = 500, 500
+        if mode == 'rgb_array':
+            self._get_viewer(mode).render(width, height)
+            # window size used for old mujoco-py:
+            data = self._get_viewer(mode).read_pixels(width,
+                                                      height,
+                                                      depth=False)
+            return data
+        elif mode == 'human':
+            self._get_viewer(mode).render(width, height)
+
+
 if __name__ == "__main__":
 
     env = RampPushEnv()

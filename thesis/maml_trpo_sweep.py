@@ -39,7 +39,7 @@ def train_for_sweep():
         meta_bsz=config.meta_bsz,
     )
 
-    for metrics in trainer.train(num_iterations=60):
+    for metrics in trainer.train(num_iterations=40):
         wandb.log(metrics)
 
 
@@ -69,7 +69,7 @@ def main():
     parser.add_argument(
         "--project",
         type=str,
-        default=f"meta-rl-sweeps-{time.time()}",
+        default=f"maml-trpo-sweeps-{time.time()}",
         help="The wandb project name to use for the sweep."
     )
     parser.add_argument(
@@ -80,13 +80,13 @@ def main():
     parser.add_argument(
         "-n", "--num_agents",
         type=int,
-        default=4,
+        default=5,
         help="Number of parallel agents to launch."
     )
     parser.add_argument(
         "-r", "--total_runs",
         type=int,
-        default=40,
+        default=20,
         help="Total number of hyperparameter combinations to try across all agents."
     )
     parser.add_argument(

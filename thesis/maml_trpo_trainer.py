@@ -166,6 +166,7 @@ class MAMLTRPOTrainer:
 
             for task_config in tqdm(self.env.sample_tasks(self.meta_bsz), leave=False, desc=f'Iteration {iteration}'):
                 clone = deepcopy(self.policy)
+                clone = clone.to(self.device)
                 self.env.set_task(task_config)
                 self.env.reset()
                 task = ch.envs.Runner(self.env)
@@ -262,7 +263,7 @@ if __name__ == '__main__':
         seed = 42
         envname = 'HalfCheetahForwardBackward-v1'
         save_interval = 100
-        os.environ['CUDA_VISIBLE_DEVICES'] = str(4)
+        os.environ['CUDA_VISIBLE_DEVICES'] = str(1)
         trainer = MAMLTRPOTrainer(
             env_name=envname,
             adapt_lr=0.1,
