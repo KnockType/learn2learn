@@ -12,6 +12,7 @@ import random
 from copy import deepcopy
 
 import cherry as ch
+import os
 import gym
 import numpy as np
 import torch
@@ -24,6 +25,7 @@ from tqdm import tqdm
 
 import learn2learn as l2l
 from policies import DiagNormalPolicy
+import wandb
 
 
 def compute_advantages(baseline, tau, gamma, rewards, dones, states, next_states):
@@ -112,14 +114,15 @@ def main(
         meta_lr=1.0,
         adapt_steps=1,
         num_iterations=500,
-        meta_bsz=40,
-        adapt_bsz=40,
+        meta_bsz=20,
+        adapt_bsz=20,
         tau=1.00,
         gamma=0.95,
-        seed=808,
+        seed=1,
         num_workers=10,
         cuda=1,
 ):
+    wandb.init(project="maml-trpo__ant_dir", name=str(seed))
     cuda = bool(cuda)
     random.seed(seed)
     np.random.seed(seed)
@@ -143,6 +146,7 @@ def main(
     if cuda:
         policy = policy.to(device)
     baseline = LinearValue(env.state_size, env.action_size)
+
 
     for iteration in range(num_iterations):
         iteration_reward = 0.0
@@ -176,6 +180,7 @@ def main(
         print('\nIteration', iteration)
         adaptation_reward = iteration_reward / meta_bsz
         print('adaptation_reward', adaptation_reward)
+        wandb.log({'adaptation_reward': adaptation_reward})
 
         # TRPO meta-optimization
         backtrack_factor = 0.5
@@ -218,8 +223,18 @@ def main(
                     p.data.add_(-stepsize, u.data)
                 break
 
+    path = f"model/maml_trpo_{env_name}_{seed}.pth"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    checkpoint = {
+        'policy_state_dict': policy.state_dict(),
+        'baseline_state_dict': baseline.state_dict(),
+    }
+    
+    torch.save(checkpoint, path)
+    print(f"Checkpoint saved successfully to {path}")
+
+
 
 if __name__ == '__main__':
-    import os
-    os.environ['CUDA_VISIBLE_DEVICES'] = str(2)
-    main(env_name="RampPush-v0")
+    os.environ['CUDA_VISIBLE_DEVICES'] = str(5)
+    main(env_name="AntDirection-v1", seed=42)

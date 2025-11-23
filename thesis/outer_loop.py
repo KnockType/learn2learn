@@ -39,7 +39,9 @@ import wandb
 import ray
 import os
 
-os.environ['CUDA_VISIBLE_DEVICES'] = str(0)
+os.environ["RAY_memory_monitor_refresh_ms"] = str(0)
+
+os.environ['CUDA_VISIBLE_DEVICES'] = str(2)
 
 if ray.is_initialized:
     ray.shutdown()
@@ -57,7 +59,7 @@ example_env = gym.make(benchmark_name)
 #Initialize WyB and save config.
 model_id=int(time.time())
 run_name = f"RL2_{config.seed}__{model_id}"
-wandb.init(project=f"rl2_{config.benchmark_name}",
+wandb.init(project=f"rl2_{config.benchmark_name}_both",
                 name= run_name,
                 config=vars(config))
 
@@ -120,8 +122,8 @@ data_statistics=Statistics_tracker()
 
 logger=Logger(num_epsiodes_of_validation=config.num_epsiodes_of_validation)
 
-model_path = f"/home/jonwee/l2l/meta_rl/thesis/rl2_models/model_{config.benchmark_name}_{config.seed}.pth"
-best_model_path= f"/home/jonwee/l2l/meta_rl/thesis/rl2_models/{config.benchmark_name}_{config.seed}__best_model.pth"
+model_path = f"/home/jonwee/l2l/meta_rl/thesis/rl2_models/model_{config.benchmark_name}_both_{config.seed}_{model_id}.pth"
+best_model_path= f"/home/jonwee/l2l/meta_rl/thesis/rl2_models/{config.benchmark_name}_both_{config.seed}__best_model_{model_id}.pth"
 best_model_performance = 0 
 
 remote_inner_loop=ray.remote(run_inner_loop) #allows for the inner loops to run on several cores paralelly

@@ -1,13 +1,13 @@
 class Metaworld:
     def __init__(self):
-        self.benchmark_name= 'HalfCheetahForwardBackward-v1'  #'ML10' , 'ML45'
+        self.benchmark_name= 'RampPush-v0'  #'ML10' , 'ML45'
         self.env_name= 'door-close-v3' 
 
         self.num_epsiodes_of_validation = 2
         self.num_lifetimes_for_validation = 60
 
         self.seeding=False
-        self.seed=808
+        self.seed=1
         self.ol_device='cuda'
         self.il_device='cpu'
 
@@ -24,7 +24,7 @@ class Metaworld:
         self.bootstrapping_lambda=0.95
 
         self.rnn_input_size  = 32 
-        self.rnn_type= 'lstm'              
+        self.rnn_type= 'gru'              
         self.rnn_hidden_state_size= 256 
         self.initial_std=1.0
 

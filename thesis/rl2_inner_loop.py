@@ -20,7 +20,7 @@ def run_inner_loop(arguments , training=True, run_deterministically=False):
     def create_env(task):
         env = gym.make(benchmark_name)
         env.unwrapped.set_task(task)  
-        env = gym.wrappers.ClipAction(env)
+        #env = gym.wrappers.ClipAction(env)
         if config.seeding:
             env.action_space.seed(config.seed)
             env.observation_space.seed(config.seed)
@@ -53,7 +53,7 @@ def run_inner_loop(arguments , training=True, run_deterministically=False):
         il_device=torch.device(config.il_device)
 
     meta_agent=meta_agent.to(il_device)
-    lifetime_buffer=Lifetime_buffer(config.num_il_lifetime_steps , env, il_device, env_name=f'{task.get("env_name")}')
+    lifetime_buffer=Lifetime_buffer(config.num_il_lifetime_steps , env, il_device, env_name=f'{task["env_name"]}')
     
     ########-----------------------------###########
 
@@ -148,7 +148,7 @@ def run_inner_loop(arguments , training=True, run_deterministically=False):
 
             #Prepare for next episode
             done=torch.ones(1).to(il_device) 
-            next_obs = torch.tensor(env.reset()[0],dtype=torch.float32).to(il_device)
+            next_obs = torch.tensor(env.reset(),dtype=torch.float32).to(il_device)
             episode_step_num=0
             episode_return=0
 

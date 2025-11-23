@@ -325,7 +325,7 @@ def main(
 
     # Initialize W&B
     wandb.init(
-        project=f"maml-trpo_ML1",
+        project=f"maml-trpo_ML10_ver2",
         name=f"seed_{seed}",
         config={
             "adapt_lr": adapt_lr,
@@ -440,7 +440,7 @@ def main(
             evaluate(benchmark, policy, baseline, adapt_lr, gamma, tau, num_workers, seed, cuda, bench, iteration)
 
 
-    path = f"model/maml_{bench}_seed_{seed}.pth"
+    path = f"model/maml_{bench}_seed_{seed}_ver2.pth"
     os.makedirs(os.path.dirname(path), exist_ok=True)
     checkpoint = {
         'policy_state_dict': policy.state_dict(),
@@ -540,7 +540,7 @@ def evaluate(benchmark, policy, baseline, adapt_lr, gamma, tau, n_workers, seed,
             wandb.log({f"seed_{seed}_task_{task_name}": wandb.Video(stacked_frames, fps=15)})
     '''
 
-    video_dir = f"videos/maml_{bench}_seed_{seed}"
+    video_dir = f"videos/maml_{bench}_seed_{seed}_ver2"
     os.makedirs(video_dir, exist_ok=True)
     print(f"\nSaving evaluation videos to {video_dir}...")
 
@@ -569,10 +569,10 @@ def evaluate(benchmark, policy, baseline, adapt_lr, gamma, tau, n_workers, seed,
 
 
 if __name__ == '__main__':
-    os.environ['CUDA_VISIBLE_DEVICES'] = str(1)
-    seed = 808
+    os.environ['CUDA_VISIBLE_DEVICES'] = str(3)
+    seed = 1
     main(
-        bench="ML1",
+        bench="ML10",
         seed=seed,
         num_workers=10,
         cuda=True,

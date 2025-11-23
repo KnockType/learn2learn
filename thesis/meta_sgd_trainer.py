@@ -11,6 +11,7 @@ import cherry as ch
 import gym
 import numpy as np
 import torch
+import time
 from cherry.algorithms import a2c
 from cherry.models.robotics import LinearValue
 from torch import optim
@@ -200,22 +201,24 @@ if __name__ == '__main__':
     # This block allows running the script directly for a single experiment
     try:
         os.environ['CUDA_VISIBLE_DEVICES'] = str(3)
-        seed = 808
-        envname = 'AntDirection-v1'
+        seed = 42
+        envname = 'RampPush-v0'
         trainer = MetaSGDTrainer(
             env_name=envname,
-            fast_lr_init = 0.08139,
-            meta_lr = 0.004335,
+            fast_lr_init = 0.08,
+            meta_lr = 0.004,
             adapt_steps = 1,
-            meta_bsz = 20,
-            adapt_bsz = 40,
+            meta_bsz = 10,
+            adapt_bsz = 20,
             tau = 1.00,
             gamma = 0.962,
             seed = seed,
             num_workers = 10,
             cuda = True,
         )
-        wandb.init(project=f"meta_sgd_{envname}_", name=f"seed_{seed}")
+        curr_time = time.time()
+        save_interval = 250
+        wandb.init(project=f"meta_sgd_{envname}_reward", name=f"seed_{seed}")
         for metrics in trainer.train(num_iterations=500):
             wandb.log(metrics)
             print(
@@ -223,7 +226,11 @@ if __name__ == '__main__':
                 f"Reward = {metrics['adaptation_reward']:.4f}, "
                 f"Meta Loss = {metrics['meta_loss']:.4f}"
             )
-        save_path = f"model/meta_sgd_{envname}_{seed}.pth"
+            current_iteration = metrics['iteration'] + 1
+            if current_iteration % save_interval == 0:
+                save_path = f"model/meta_sgd_{envname}_reward_{seed}_iter{current_iteration}_{curr_time}.pth"
+                trainer.save_model(save_path)
+        save_path = f"model/meta_sgd_{envname}_reward_{seed}.pth"
         trainer.save_model(save_path)
     except gym.error.DependencyNotInstalled:
         print("="*60)

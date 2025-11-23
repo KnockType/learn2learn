@@ -24,6 +24,7 @@ from tqdm import tqdm
 import learn2learn as l2l
 from examples.rl.policies import DiagNormalPolicy
 import learn2learn.gym.envs.custom
+import time
 
 def compute_advantages(baseline, tau, gamma, rewards, dones, states, next_states):
     # Update baseline
@@ -261,14 +262,14 @@ if __name__ == '__main__':
     # This block allows running the script directly for a single experiment
     try:
         seed = 42
-        envname = 'HalfCheetahForwardBackward-v1'
-        save_interval = 100
-        os.environ['CUDA_VISIBLE_DEVICES'] = str(1)
+        envname = 'RampPush-v0'
+        save_interval = 250
+        os.environ['CUDA_VISIBLE_DEVICES'] = str(0)
         trainer = MAMLTRPOTrainer(
             env_name=envname,
             adapt_lr=0.1,
             meta_lr=1.0,
-            adapt_steps=2,
+            adapt_steps=1,
             meta_bsz=20,
             adapt_bsz=20,
             tau=1.0,
@@ -277,7 +278,8 @@ if __name__ == '__main__':
             num_workers=10,
             cuda=True,
         )
-        wandb.init(project=f"maml_trpo_{envname}_", name=f"seed_{seed}")
+        curr_time = time.time()
+        wandb.init(project=f"maml_trpo_{envname}_both", name=f"seed_{seed}")
         for metrics in trainer.train(num_iterations=500):
             wandb.log(metrics)
             print(
@@ -286,9 +288,9 @@ if __name__ == '__main__':
             )
             current_iteration = metrics['iteration'] + 1
             if current_iteration % save_interval == 0:
-                save_path = f"model/maml_trpo_{envname}_{seed}_iter{current_iteration}.pth"
+                save_path = f"model/maml_trpo_{envname}_both_{seed}_iter{current_iteration}_{curr_time}.pth"
                 trainer.save_model(save_path)
-        save_path = f"model/maml_trpo_{envname}_{seed}.pth"
+        save_path = f"model/maml_trpo_{envname}_both_{seed}_{curr_time}.pth"
         trainer.save_model(save_path)
     except gym.error.DependencyNotInstalled:
         print("="*60)

@@ -115,7 +115,7 @@ class AntDirectionEnv(MetaEnv, MujocoEnv, gym.utils.EzPickle):
 
 if __name__ == '__main__':
     env = AntDirectionEnv()
-    for task in [env.get_task(), env.sample_tasks(1)[0]]:
+    for task in env.sample_tasks(10):
         env.set_task(task)
         env.reset()
         action = env.action_space.sample()

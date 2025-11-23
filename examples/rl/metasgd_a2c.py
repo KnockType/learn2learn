@@ -72,7 +72,7 @@ def main(
     torch.manual_seed(seed)
 
     def make_env():
-        return gym.make(env_name)
+        return ch.envs.ActionSpaceScaler(gym.make(env_name))
 
     env = l2l.gym.AsyncVectorEnv([make_env for _ in range(num_workers)])
     env.seed(seed)
@@ -119,4 +119,4 @@ def main(
 
 
 if __name__ == '__main__':
-    main()
+    main(env_name="HalfCheetahForwardBackward-v1")

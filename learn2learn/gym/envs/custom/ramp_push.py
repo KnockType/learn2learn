@@ -3,6 +3,7 @@
 import os
 import numpy as np
 from scipy.spatial.transform import Rotation as R
+from enum import Enum
 
 import gym
 from gym import utils
@@ -16,6 +17,13 @@ FRAME_SKIP = 5
 TIMESTEP = 0.002
 RENDER_FPS = int(np.round(1.0 / (TIMESTEP * FRAME_SKIP)))
 
+class TaskType(Enum):
+    """Enum to define the type of task randomization."""
+    PHYSICS = "physics"                # Only physics parameters are randomized
+    REWARD_WEIGHTS = "reward_weights"  # Only reward weights are randomized
+    BOTH = "both"                      # Both physics and reward are randomized
+
+
 def get_physics_ranges() -> config_dict.ConfigDict:
     # (This function remains the same)
     return config_dict.create(
@@ -26,6 +34,14 @@ def get_physics_ranges() -> config_dict.ConfigDict:
         tool_mass={"low": 1.0, "high": 3.0},
         friction={"low": 0.3, "high": 0.8},
         gravity={"low": 1.5 * -9.81, "high": 0.8 * -9.81},
+        reward_weight = {"low": 0.5, "high": 3},
+    )
+
+def get_reward_weight_ranges() -> config_dict.ConfigDict:
+    """Defines the sampling range for reward weights."""
+    return config_dict.create(
+        reward_weight={"low": 0.5, "high": 2.0},
+        ctrl_cost_weight={"low": 0.1, "high": 0.3},
     )
 
 def default_config() -> config_dict.ConfigDict:
@@ -41,6 +57,7 @@ def default_config() -> config_dict.ConfigDict:
         object_mass=1.0,
         tool_mass=1.0,
         slope=-30.0,
+        env_name="ramp_push"
     )
 
 class RampPushEnv(l2l.gym.MetaEnv, MujocoEnv, utils.EzPickle):
@@ -51,7 +68,8 @@ class RampPushEnv(l2l.gym.MetaEnv, MujocoEnv, utils.EzPickle):
         utils.EzPickle.__init__(self)
         self._config = config
         self._steps = 0
-        
+        self._task_type = TaskType.BOTH
+
         # This is a new helper to contain the initialization logic
         self._re_init(self._config)
 
@@ -93,24 +111,51 @@ class RampPushEnv(l2l.gym.MetaEnv, MujocoEnv, utils.EzPickle):
             dtype=np.float32
         )
 
-    # L2L MetaEnv Implementation
-    def sample_tasks(self, num_tasks: int) -> list:
-        """Generates a list of 'num_tasks' different physics configurations."""
-        tasks = []
+
+    def _sample_physics_params(self) -> dict:
         ranges = get_physics_ranges()
+        friction_val = np.random.uniform(ranges.friction.low, ranges.friction.high)
+        gravity_z = np.random.uniform(ranges.gravity.low, ranges.gravity.high)
+        return {
+            "slope": np.random.uniform(ranges.slope.low, ranges.slope.high),
+            "object_mass": np.random.uniform(ranges.object_mass.low, ranges.object_mass.high),
+            "tool_mass": np.random.uniform(ranges.tool_mass.low, ranges.tool_mass.high),
+            "friction": np.array([friction_val] * 3),
+            "gravity": np.array([0.0, 0.0, gravity_z]),
+        }
+
+
+    def _sample_reward_weight_params(self) -> dict:
+        """Samples a dictionary of random reward weight parameters."""
+        ranges = get_reward_weight_ranges()
+        return {
+            "reward_weight": np.random.uniform(ranges.reward_weight.low, ranges.reward_weight.high),
+            "ctrl_cost_weight": np.random.uniform(ranges.ctrl_cost_weight.low, ranges.ctrl_cost_weight.high),
+        }
+
+    def sample_tasks(self, num_tasks: int) -> list:
+        tasks = []
         for _ in range(num_tasks):
             task_config = default_config()
-            task_config.ramp_size[0] = np.random.uniform(ranges.ramp_size_x.low, ranges.ramp_size_x.high)
-            task_config.ramp_pos[0] = np.random.uniform(ranges.ramp_pos_x.low, ranges.ramp_pos_x.high)
-            task_config.slope = np.random.uniform(ranges.slope.low, ranges.slope.high)
-            task_config.object_mass = np.random.uniform(ranges.object_mass.low, ranges.object_mass.high)
-            task_config.tool_mass = np.random.uniform(ranges.tool_mass.low, ranges.tool_mass.high)
-            friction_val = np.random.uniform(ranges.friction.low, ranges.friction.high)
-            task_config.friction = np.array([friction_val] * 3)
-            gravity_z = np.random.uniform(ranges.gravity.low, ranges.gravity.high)
-            task_config.gravity = np.array([0.0, 0.0, gravity_z])
+            if self._task_type == TaskType.PHYSICS:
+                task_config.update(self._sample_physics_params())
+            elif self._task_type == TaskType.REWARD_WEIGHTS:
+                task_config.update(self._sample_reward_weight_params())
+            elif self._task_type == TaskType.BOTH:
+                task_config.update(self._sample_physics_params())
+                task_config.update(self._sample_reward_weight_params())
             tasks.append(task_config)
         return tasks
+
+    def set_task_type(self, new_task_type: TaskType):
+        """
+        Dynamically changes the task sampling behavior of the environment.
+
+        Args:
+            new_task_type (TaskType): The new task type to use for subsequent
+                                      calls to sample_tasks().
+        """
+        self._task_type = new_task_type
 
     def set_task(self, task: config_dict.ConfigDict):
         """Sets the environment to a specific task configuration."""
@@ -118,7 +163,6 @@ class RampPushEnv(l2l.gym.MetaEnv, MujocoEnv, utils.EzPickle):
         self._set_physics()
 
     def _set_physics(self):
-        # (This logic remains the same)
         self.model.geom_pos[self._geom_ids["ramp"]] = self._ramp_pos
         self.model.geom_size[self._geom_ids["ramp"]] = self._ramp_size
         r = R.from_euler('xyz', [0, self._slope, 0], degrees=True)
@@ -130,10 +174,35 @@ class RampPushEnv(l2l.gym.MetaEnv, MujocoEnv, utils.EzPickle):
         self.model.body_mass[self._body_ids["tool"]] = self._tool_mass
 
     def _verify_physics(self):
-        # (This logic remains the same)
+        # Check that physics parameters are within bounds
         r = get_physics_ranges()
+
+        # Verify the ramp size
+        assert self._ramp_size.shape == (3,)
+        assert r.ramp_size_x["low"] <= self._ramp_size[0] <= r.ramp_size_x["high"]
+        assert self._ramp_size[1] == 1.0 and self._ramp_size[2] == 0.05 # Fixed values
+
+        # Verify the ramp pos
+        assert self._ramp_pos.shape == (3,)
+        assert r.ramp_pos_x["low"] <= self._ramp_pos[0] <= r.ramp_pos_x["high"]
+        assert self._ramp_pos[1] == 0.0 and self._ramp_pos[2] == 0.0 # Fixed values
+
+        # Verify ramp slope
         assert r.slope["low"] <= self._slope <= r.slope["high"]
-        # ...
+
+        # Verify object and tool mass
+        assert r.object_mass["low"] <= self._object_mass <= r.object_mass["high"]
+        assert r.tool_mass["low"] <= self._tool_mass <= r.tool_mass["high"]
+
+        # Verify friction
+        assert self._friction.shape == (3,)
+        for f in self._friction:
+            assert r.friction["low"] <= f <= r.friction["high"]
+
+        # Verify gravity
+        assert self._gravity.shape == (3,)
+        assert r.gravity["low"] <= self._gravity[2] <= r.gravity["high"]
+        assert self._gravity[0] == 0.0 and self._gravity[1] == 0.0
 
     def _set_goals(self):
         self._goal_z = np.abs((self._ramp_size[0] / 2.0) * np.sin(np.deg2rad(self._slope)))
@@ -156,7 +225,6 @@ class RampPushEnv(l2l.gym.MetaEnv, MujocoEnv, utils.EzPickle):
         ]).astype(np.float32)
 
     def step(self, action: np.ndarray):
-        # (This logic remains the same)
         self.do_simulation(action, self.frame_skip)
         obs = self._get_obs()
         reward_goal = -1.0 * self._reward_weight * (self._d_tool2obj + self._z_obj2goal + self._x_obj2goal)

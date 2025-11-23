@@ -49,7 +49,7 @@ class HalfCheetahForwardBackwardEnv(MetaEnv, MujocoEnv, gym.utils.EzPickle):
 
     def sample_tasks(self, num_tasks):
         directions = np.random.choice((-1.0, 1.0), (num_tasks,))
-        tasks = [{'direction': direction} for direction in directions]
+        tasks = [{'env_name': 'half_cheetah_forward_backward', 'direction': direction} for direction in directions]
         return tasks
 
     # -------- Mujoco Methods --------
@@ -109,7 +109,16 @@ class HalfCheetahForwardBackwardEnv(MetaEnv, MujocoEnv, gym.utils.EzPickle):
 
 
 if __name__ == '__main__':
-    env = HalfCheetahForwardBackwardEnv()
+    env  = gym.make("HalfCheetahForwardBackward-v1")
+    print("Env", env)
+    print("Unwrapped", env.unwrapped)
+    tasks = env.sample_tasks(2)
+    print("Tasks", tasks)
+    unwr_tasks = env.unwrapped.sample_tasks(2)
+    print("Unwr Tasks", unwr_tasks)
+    print("Goal", env.goal_direction)
+    env.set_task(tasks[0])
+    print("New Goal", env.goal_direction)
     for task in [env.get_task(), env.sample_tasks(1)[0]]:
         env.set_task(task)
         env.reset()

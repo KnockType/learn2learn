@@ -23,14 +23,12 @@ parameters:
     min: 0.0001
     max: 0.01
   adapt_steps:
-    values: [1, 3, 5]
+    values: [1, 3]
   gamma:
-    distribution: uniform
-    min: 0.95
-    max: 0.99
+    value: 0.9
   tau:
-    value: 1.00
+    value: 0.95
   adapt_bsz:
-    values: [20, 40]
+    values: [20, 30]
   meta_bsz:
-    values: [10, 20]
+    values: [20, 30]
